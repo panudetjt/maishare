@@ -16,7 +16,6 @@ export const Route = createFileRoute("/")({
   loader: () => ({
     recents: loadRecents(),
     webrtc: typeof RTCPeerConnection !== "undefined" && typeof WebSocket !== "undefined",
-    isSecure: window.isSecureContext,
   }),
   pendingComponent: HomePending,
   component: HomeComponent,
@@ -24,7 +23,7 @@ export const Route = createFileRoute("/")({
 
 function HomeComponent() {
   const search = Route.useSearch();
-  const { recents: initialRecents, webrtc, isSecure } = Route.useLoaderData();
+  const { recents: initialRecents, webrtc } = Route.useLoaderData();
   const navigate = useNavigate({ from: Route.fullPath });
   const [name, setName] = useState(search.name ?? loadName());
   const [joinValue, setJoinValue] = useState("");
@@ -42,7 +41,7 @@ function HomeComponent() {
     void navigate({
       to: "/r/$roomId",
       params: { roomId: makeRoomCode() },
-      search: { k: makeRoomKey(), name, tab: "chat" },
+      search: { k: makeRoomKey(), name },
     });
   }
 
@@ -73,7 +72,7 @@ function HomeComponent() {
     void navigate({
       to: "/r/$roomId",
       params: { roomId: parsed.roomId },
-      search: { ...(parsed.k ? { k: parsed.k } : {}), name, tab: "chat" },
+      search: { ...(parsed.k ? { k: parsed.k } : {}), name },
     });
   }
 
@@ -85,7 +84,7 @@ function HomeComponent() {
           <span className="brand-name">maishare</span>
         </div>
         <p className="tagline">
-          Local-first, <strong>peer-to-peer</strong> sharing for files, clipboard, text and pastes.
+          Local-first, <strong>peer-to-peer</strong> sharing for files and text chat.
           <br />
           No cloud. No accounts. Data never leaves your network.
         </p>
@@ -154,7 +153,7 @@ function HomeComponent() {
                     <Link
                       to="/r/$roomId"
                       params={{ roomId: r.roomId }}
-                      search={{ ...(r.k ? { k: r.k } : {}), tab: "chat" }}
+                      search={r.k ? { k: r.k } : {}}
                       className="recent-chip"
                     >
                       <QrIcon size={14} />
@@ -165,12 +164,6 @@ function HomeComponent() {
               </ul>
             </div>
           ) : null}
-          {!isSecure && (
-            <p className="notice">
-              Open over <code>localhost</code> or HTTPS for full clipboard access — pasting works
-              anywhere.
-            </p>
-          )}
         </section>
 
         <section className={`panel home-card nearby-home ${nearbyOpen ? "nearby-open" : ""}`}>
@@ -236,7 +229,7 @@ function LanRooms() {
                   className="lan-room"
                   to="/r/$roomId"
                   params={{ roomId: r.roomId }}
-                  search={{ tab: "chat" }}
+                  search={{}}
                 >
                   <code>{r.roomId}</code>
                   <span className="lan-meta muted small">

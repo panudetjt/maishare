@@ -1,15 +1,7 @@
-import { platformLabel } from "../device";
-import {
-  concatFrame,
-  decoder,
-  encoder,
-  ENC_OVERHEAD,
-  FRAME,
-  type Control,
-  type ShareKind,
-} from "./protocol";
+import { platformLabel, uuid } from "../device";
+import { concatFrame, decoder, encoder, ENC_OVERHEAD, FRAME, type Control } from "./protocol";
 import { RoomCipher } from "./crypto";
-import { Signaling, type SignalStatus } from "./signaling";
+import { Signaling, type RoomTransport, type SignalStatus } from "./signaling";
 import { LanProbe } from "./lan-probe";
 
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
@@ -36,6 +28,12 @@ export interface ChatMsg {
   text: string;
   at: number;
   mine: boolean;
+  /** set when the text was sent together with file attachments */
+  groupId?: string;
+  /** arrived sealed with the room key (false = DTLS transport only) */
+  sealed?: boolean;
+  /** placeholder for a frame that could not be read — never sent anywhere */
+  system?: boolean;
 }
 
 export type TransferStatus = "queued" | "active" | "done" | "error" | "cancelled";
@@ -48,28 +46,17 @@ export interface TransferView {
   name: string;
   size: number;
   mime: string;
-  kind: ShareKind;
   status: TransferStatus;
   bytes: number;
   speed: number;
   at: number;
+  /** files attached to one message share a group — drives the lightbox gallery */
+  groupId: string;
+  /** arrived sealed with the room key (false = DTLS transport only) */
+  sealed?: boolean;
   blobUrl?: string;
   blob?: Blob;
 }
-
-export type ClipItem =
-  | { id: string; at: number; peerId: string; peerName: string; kind: "text"; text: string }
-  | {
-      id: string;
-      at: number;
-      peerId: string;
-      peerName: string;
-      kind: "image";
-      mime: string;
-      size: number;
-      blobUrl: string;
-      blob: Blob;
-    };
 
 export interface Toast {
   id: number;
@@ -87,7 +74,6 @@ export interface RoomState {
   peers: PeerView[];
   chats: ChatMsg[];
   transfers: TransferView[];
-  clips: ClipItem[];
   toasts: Toast[];
   sentTotal: number;
   recvTotal: number;
@@ -96,7 +82,6 @@ export interface RoomState {
 interface SendJob {
   view: TransferView;
   file: File;
-  kind: ShareKind;
   bytesSent: number;
   done: boolean;
   failed: boolean;
@@ -129,10 +114,32 @@ interface PeerCtx {
   maxChunk: number;
   incoming: Incoming | null;
   retriedIce: boolean;
+  /** peer can open our sealed frames (crypto.subtle needs a secure context) —
+   * false until its first hello proves otherwise */
+  e2e: boolean;
+  /** one unreadable-frame warning per connection — no toast storms */
+  undecryptableWarned: boolean;
 }
 
 function rid(): string {
-  return crypto.randomUUID();
+  return uuid();
+}
+
+/** Wait for host-candidate gathering so localDescription is a complete SDP. */
+function gathered(pc: RTCPeerConnection, timeoutMs = 1500): Promise<void> {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      pc.removeEventListener("icegatheringstatechange", onChange);
+      clearTimeout(timer);
+      resolve();
+    };
+    const onChange = () => {
+      if (pc.iceGatheringState === "complete") done();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    pc.addEventListener("icegatheringstatechange", onChange);
+  });
 }
 
 export class RoomClient {
@@ -141,15 +148,22 @@ export class RoomClient {
   private selfName: string;
   private cipher: RoomCipher | null = null;
   private readonly cipherReady: Promise<void>;
-  private readonly sig: Signaling;
+  /** WS signaling by default; Nearby swaps in a DirectTransport */
+  private readonly sig: RoomTransport;
+  /** gather all candidates into every offer/answer (QR signaling) */
+  private readonly gatherSdp: boolean;
+  private readonly iceServers: RTCIceServer[];
+  /** fixed impolite/impolite role for single-peer transports */
+  private readonly initiatorOverride: boolean | undefined;
   private readonly peers = new Map<string, PeerCtx>();
   /** in-flight discovery verification probes, keyed by the prober's id */
   private readonly probes = new Map<string, LanProbe>();
   private readonly outJobs = new Map<string, Set<SendJob>>();
-  private deferred: { view: TransferView; file: File; kind: ShareKind }[] = [];
+  private deferred: { view: TransferView; file: File }[] = [];
+  /** chat frames sent while no peer was connected, flushed on the first open */
+  private pendingChats: Control[] = [];
   private chats: ChatMsg[] = [];
   private transfers: TransferView[] = [];
-  private clips: ClipItem[] = [];
   private toasts: Toast[] = [];
   private sentTotal = 0;
   private recvTotal = 0;
@@ -163,9 +177,24 @@ export class RoomClient {
   private readonly listeners = new Set<() => void>();
   private state: RoomState;
 
-  constructor(opts: { roomId: string; key?: string; name: string }) {
+  constructor(opts: {
+    roomId: string;
+    key?: string;
+    name: string;
+    /** omit for the default WebSocket signaling transport */
+    transport?: RoomTransport;
+    /** gather candidates into SDP instead of trickling (QR signaling) */
+    gatherSdp?: boolean;
+    /** defaults to STUN for rooms; Nearby passes [] (host-only, no internet) */
+    iceServers?: RTCIceServer[];
+    /** fixed perfect-negotiation role for single-peer direct sessions */
+    initiator?: boolean;
+  }) {
     this.roomId = opts.roomId;
     this.selfName = opts.name;
+    this.gatherSdp = opts.gatherSdp ?? false;
+    this.iceServers = opts.iceServers ?? ICE_SERVERS;
+    this.initiatorOverride = opts.initiator;
     this.cipherReady = opts.key
       ? RoomCipher.fromKey(opts.key).then(
           (c) => {
@@ -175,13 +204,16 @@ export class RoomClient {
         )
       : Promise.resolve();
     this.state = this.snapshot();
-    this.sig = new Signaling(
-      { roomId: opts.roomId, peerId: this.selfId, name: opts.name },
-      {
-        onStatus: (s) => this.onSignalStatus(s),
-        onMessage: (m) => this.onServerMsg(m),
-      },
-    );
+    const signaling = new Signaling({
+      roomId: opts.roomId,
+      peerId: this.selfId,
+      name: opts.name,
+    });
+    this.sig = opts.transport ?? signaling;
+    this.sig.bind({
+      onMessage: (m) => this.onServerMsg(m),
+      onStatus: (s) => this.onSignalStatus(s),
+    });
   }
 
   async start() {
@@ -221,7 +253,6 @@ export class RoomClient {
       })),
       chats: this.chats,
       transfers: this.transfers.map((t) => ({ ...t })),
-      clips: this.clips,
       toasts: this.toasts,
       sentTotal: this.sentTotal,
       recvTotal: this.recvTotal,
@@ -248,13 +279,19 @@ export class RoomClient {
     if (!n || n === this.selfName) return;
     this.selfName = n;
     this.sig.updateName(n);
-    this.broadcastControl({ t: "hello", name: n, platform: platformLabel() });
+    this.broadcastControl({ t: "hello", name: n, platform: platformLabel(), e2e: !!this.cipher });
     this.schedule();
   }
 
-  sendChat(text: string) {
+  sendChat(text: string, groupId?: string) {
     const t = text.trim();
     if (!t) return;
+    const openPeers = [...this.peers.values()].filter((p) => p.dc?.readyState === "open");
+    // truth at send time: sealed only when WE have a cipher and every connected
+    // peer can unseal; with nobody connected we don't know yet (undefined,
+    // shown neutrally)
+    const sealed =
+      openPeers.length === 0 ? undefined : this.cipher !== null && openPeers.every((p) => p.e2e);
     const msg: ChatMsg = {
       id: rid(),
       peerId: this.selfId,
@@ -262,30 +299,41 @@ export class RoomClient {
       text: t,
       at: Date.now(),
       mine: true,
+      groupId,
+      sealed,
     };
     this.chats = [...this.chats, msg];
     this.schedule();
-    this.broadcastControl({ t: "chat", id: msg.id, text: t, at: msg.at });
+    const frame: Control = { t: "chat", id: msg.id, text: t, at: msg.at, g: groupId };
+    if (openPeers.length) {
+      this.broadcastControl(frame);
+    } else {
+      this.pendingChats.push(frame);
+    }
   }
 
-  sendClipboardText(text: string) {
+  /** one message = optional text + optional files, all sharing one group id */
+  sendMessage(text: string, files: File[] | FileList) {
     const t = text.trim();
-    if (!t) return;
-    const id = rid();
-    const at = Date.now();
-    this.clips = [
-      ...this.clips,
-      { id, at, peerId: this.selfId, peerName: this.selfName, kind: "text", text: t },
-    ];
-    this.schedule();
-    this.broadcastControl({ t: "clip", id, text: t, at });
+    const list = Array.from(files).filter((f) => f && f.size >= 0);
+    if (!t && !list.length) return;
+    if (!list.length) {
+      this.sendChat(t);
+      return;
+    }
+    const groupId = rid();
+    if (t) this.sendChat(t, groupId);
+    this.sendFiles(list, groupId);
   }
 
-  sendFiles(files: File[] | FileList, kind: ShareKind = "file") {
+  sendFiles(files: File[] | FileList, groupId: string = rid()) {
     const list = Array.from(files).filter((f) => f && f.size >= 0);
     if (!list.length) return;
     const openPeers = [...this.peers.values()].filter((p) => p.dc?.readyState === "open");
+    const sealed =
+      openPeers.length === 0 ? undefined : this.cipher !== null && openPeers.every((p) => p.e2e);
     for (const file of list) {
+      const isImage = (file.type || "").startsWith("image/");
       const view: TransferView = {
         id: rid(),
         dir: "out",
@@ -294,17 +342,22 @@ export class RoomClient {
         name: file.name || "file",
         size: file.size,
         mime: file.type || "application/octet-stream",
-        kind,
         status: "queued",
         bytes: 0,
         speed: 0,
         at: Date.now(),
+        groupId,
+        sealed,
+        // keep the source bytes so the message can be resent later; the
+        // blobUrl preview is only needed for images
+        blob: file,
+        ...(isImage ? { blobUrl: URL.createObjectURL(file) } : {}),
       };
       this.transfers = [view, ...this.transfers];
       if (openPeers.length) {
-        for (const ctx of openPeers) this.enqueue(ctx, view, file, kind);
+        for (const ctx of openPeers) this.enqueue(ctx, view, file);
       } else {
-        this.deferred.push({ view, file, kind });
+        this.deferred.push({ view, file });
       }
     }
     if (!openPeers.length) {
@@ -335,10 +388,8 @@ export class RoomClient {
 
   clearFinishedTransfers() {
     const keep = this.transfers.filter((t) => t.status === "queued" || t.status === "active");
-    const clipUrls = new Set(this.clips.map((c) => (c.kind === "image" ? c.blobUrl : "")));
     for (const t of this.transfers) {
-      if (t.blobUrl && !keep.includes(t) && !clipUrls.has(t.blobUrl))
-        URL.revokeObjectURL(t.blobUrl);
+      if (t.blobUrl && !keep.includes(t)) URL.revokeObjectURL(t.blobUrl);
     }
     this.transfers = keep;
     this.schedule();
@@ -346,15 +397,7 @@ export class RoomClient {
 
   clearChat() {
     this.chats = [];
-    this.schedule();
-  }
-
-  clearClips() {
-    const transferUrls = new Set(this.transfers.map((t) => t.blobUrl ?? ""));
-    for (const c of this.clips) {
-      if (c.kind === "image" && !transferUrls.has(c.blobUrl)) URL.revokeObjectURL(c.blobUrl);
-    }
-    this.clips = [];
+    this.pendingChats = [];
     this.schedule();
   }
 
@@ -376,7 +419,6 @@ export class RoomClient {
     for (const probe of this.probes.values()) probe.close();
     this.probes.clear();
     for (const t of this.transfers) if (t.blobUrl) URL.revokeObjectURL(t.blobUrl);
-    for (const c of this.clips) if (c.kind === "image") URL.revokeObjectURL(c.blobUrl);
     if (this.emitTimer) clearTimeout(this.emitTimer);
     this.listeners.clear();
   }
@@ -474,8 +516,8 @@ export class RoomClient {
       }
       return existing;
     }
-    const polite = this.selfId < peerId;
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 2 });
+    const polite = this.initiatorOverride != null ? !this.initiatorOverride : this.selfId < peerId;
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers, iceCandidatePoolSize: 2 });
     const ctx: PeerCtx = {
       peerId,
       name: name || "peer",
@@ -495,6 +537,8 @@ export class RoomClient {
       maxChunk: 64 * 1024,
       incoming: null,
       retriedIce: false,
+      e2e: false,
+      undecryptableWarned: false,
     };
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) this.sig.send({ t: "signal", to: peerId, data: candidate.toJSON() });
@@ -503,6 +547,7 @@ export class RoomClient {
       try {
         ctx.makingOffer = true;
         await pc.setLocalDescription();
+        if (this.gatherSdp) await gathered(pc);
         const ld = pc.localDescription;
         if (ld) this.sig.send({ t: "signal", to: peerId, data: { type: ld.type, sdp: ld.sdp } });
       } catch (err) {
@@ -561,6 +606,7 @@ export class RoomClient {
         }
         ctx.settingRemoteAnswer = desc.type === "answer";
         await ctx.pc.setLocalDescription();
+        if (this.gatherSdp) await gathered(ctx.pc);
         ctx.settingRemoteAnswer = false;
         const ld = ctx.pc.localDescription;
         if (ld) this.sig.send({ t: "signal", to: peerId, data: { type: ld.type, sdp: ld.sdp } });
@@ -593,9 +639,19 @@ export class RoomClient {
       const mms = sctp?.maxMessageSize;
       ctx.maxChunk = Math.max(16 * 1024, Math.min(mms ?? 65536, 256 * 1024));
       this.startPing(ctx);
-      this.flushDeferred(ctx);
-      void this.sendControl(ctx, { t: "hello", name: this.selfName, platform: platformLabel() });
-      void this.pump(ctx);
+      // hello goes first and carries our crypto capability — queued traffic
+      // must wait for the peer's hello when we seal, so nothing gets dropped
+      // by a receiver that cannot open sealed frames
+      void this.sendControl(ctx, {
+        t: "hello",
+        name: this.selfName,
+        platform: platformLabel(),
+        e2e: !!this.cipher,
+      });
+      if (!this.cipher) {
+        this.flushDeferred(ctx);
+        void this.pump(ctx);
+      }
       this.schedule();
     };
     dc.onclose = () => {
@@ -616,14 +672,20 @@ export class RoomClient {
   }
 
   private flushDeferred(ctx: PeerCtx) {
+    // text first so a caption precedes its file-starts on the wire
+    if (this.pendingChats.length) {
+      const chats = this.pendingChats;
+      this.pendingChats = [];
+      for (const c of chats) void this.sendControl(ctx, c);
+    }
     if (!this.deferred.length) return;
     const items = this.deferred;
     this.deferred = [];
-    for (const d of items) this.enqueue(ctx, d.view, d.file, d.kind);
+    for (const d of items) this.enqueue(ctx, d.view, d.file);
   }
 
-  private enqueue(ctx: PeerCtx, view: TransferView, file: File, kind: ShareKind) {
-    const job: SendJob = { view, file, kind, bytesSent: 0, done: false, failed: false };
+  private enqueue(ctx: PeerCtx, view: TransferView, file: File) {
+    const job: SendJob = { view, file, bytesSent: 0, done: false, failed: false };
     let jobs = this.outJobs.get(view.id);
     if (!jobs) {
       jobs = new Set();
@@ -640,9 +702,11 @@ export class RoomClient {
     const dc = ctx.dc;
     if (!dc || dc.readyState !== "open") return;
     const json = encoder.encode(JSON.stringify(c));
-    const frame = this.cipher
-      ? await this.cipher.seal(FRAME.CONTROL_ENC, json)
-      : concatFrame(FRAME.CONTROL, json);
+    // seal only for peers whose hello proved they can unseal
+    const frame =
+      this.cipher && ctx.e2e
+        ? await this.cipher.seal(FRAME.CONTROL_ENC, json)
+        : concatFrame(FRAME.CONTROL, json);
     if (dc.readyState === "open") {
       try {
         dc.send(frame);
@@ -654,6 +718,47 @@ export class RoomClient {
     for (const p of this.peers.values()) void this.sendControl(p, c);
   }
 
+  /** a frame arrived that we cannot read — tell the user on BOTH sides and
+   * never stay silent (this is how the iOS receive bug hid for so long) */
+  private notifyUndecryptable(ctx: PeerCtx, detail: "sealed" | "malformed" | "orphan") {
+    // sealed frames arrive one per message, but chunks flood — one warning
+    // per connection keeps the timeline readable
+    if (detail !== "sealed" && ctx.undecryptableWarned) return;
+    ctx.undecryptableWarned = true;
+    const text =
+      detail === "sealed"
+        ? "⚠︎ Could not decrypt this message — the sender's app may be outdated or the room key differs."
+        : detail === "malformed"
+          ? "⚠︎ Received a malformed message that could not be read."
+          : "⚠︎ Received file data without its transfer header — ask the sender to resend.";
+    this.chats = [
+      ...this.chats,
+      {
+        id: rid(),
+        peerId: ctx.peerId,
+        name: ctx.name,
+        text,
+        at: Date.now(),
+        mine: false,
+        system: true,
+      },
+    ];
+    this.toast("A message could not be decrypted — see the warning in the timeline", "error");
+    // back-channel is always plain so the sender can parse it regardless of keys
+    const dc = ctx.dc;
+    if (dc && dc.readyState === "open") {
+      try {
+        dc.send(
+          concatFrame(
+            FRAME.CONTROL,
+            encoder.encode(JSON.stringify({ t: "undecryptable", detail })),
+          ),
+        );
+      } catch {}
+    }
+    this.schedule();
+  }
+
   private onFrame(ctx: PeerCtx, data: unknown) {
     if (typeof data === "string") return;
     const u8 = new Uint8Array(data as ArrayBuffer);
@@ -661,56 +766,76 @@ export class RoomClient {
     const type = u8[0];
     const body = u8.subarray(1);
     switch (type) {
-      case FRAME.CONTROL:
-        this.onControl(ctx, JSON.parse(decoder.decode(body)) as Control);
+      case FRAME.CONTROL: {
+        let c: Control;
+        try {
+          c = JSON.parse(decoder.decode(body)) as Control;
+        } catch {
+          this.notifyUndecryptable(ctx, "malformed");
+          break;
+        }
+        this.onControl(ctx, c, false);
         break;
+      }
       case FRAME.CONTROL_ENC:
         if (this.cipher)
-          this.cipher
-            .open(body)
-            .then((pt) => this.onControl(ctx, JSON.parse(decoder.decode(pt)) as Control))
-            .catch(() => {});
+          this.cipher.open(body).then(
+            (pt) => this.onControl(ctx, JSON.parse(decoder.decode(pt)) as Control, true),
+            () => this.notifyUndecryptable(ctx, "sealed"),
+          );
+        else this.notifyUndecryptable(ctx, "sealed");
         break;
       case FRAME.CHUNK:
         this.onChunk(ctx, body);
         break;
       case FRAME.CHUNK_ENC:
         if (this.cipher)
-          this.cipher
-            .open(body)
-            .then((pt) => this.onChunk(ctx, pt))
-            .catch(() => {});
+          this.cipher.open(body).then(
+            (pt) => this.onChunk(ctx, pt),
+            () => this.notifyUndecryptable(ctx, "sealed"),
+          );
+        else this.notifyUndecryptable(ctx, "sealed");
         break;
     }
   }
 
-  private onControl(ctx: PeerCtx, c: Control) {
+  private onControl(ctx: PeerCtx, c: Control, sealed: boolean) {
     switch (c.t) {
       case "hello":
         ctx.name = c.name || ctx.name;
         ctx.platform = c.platform;
+        ctx.e2e = c.e2e === true;
+        // now we know whether they can open sealed frames — release anything
+        // that was waiting for exactly this (flushing twice is a no-op)
+        if (this.cipher ? ctx.e2e : true) {
+          this.flushDeferred(ctx);
+          void this.pump(ctx);
+        }
         this.schedule();
         break;
       case "chat":
         this.chats = [
           ...this.chats,
-          { id: c.id, peerId: ctx.peerId, name: ctx.name, text: c.text, at: c.at, mine: false },
-        ];
-        this.schedule();
-        break;
-      case "clip":
-        this.clips = [
-          ...this.clips,
           {
             id: c.id,
-            at: c.at,
             peerId: ctx.peerId,
-            peerName: ctx.name,
-            kind: "text",
+            name: ctx.name,
             text: c.text,
+            at: c.at,
+            mine: false,
+            groupId: c.g,
+            sealed,
           },
         ];
         this.schedule();
+        break;
+      case "undecryptable":
+        this.toast(
+          c.detail === "orphan"
+            ? "The other side got file data without a header — resend the file"
+            : "Your message could not be decrypted by the other side",
+          "error",
+        );
         break;
       case "file-start": {
         const view: TransferView = {
@@ -721,11 +846,12 @@ export class RoomClient {
           name: c.name,
           size: c.size,
           mime: c.mime,
-          kind: c.kind,
           status: "active",
           bytes: 0,
           speed: 0,
           at: Date.now(),
+          groupId: c.g,
+          sealed,
         };
         ctx.incoming = {
           view,
@@ -765,7 +891,12 @@ export class RoomClient {
 
   private onChunk(ctx: PeerCtx, body: Uint8Array<ArrayBuffer>) {
     const inc = ctx.incoming;
-    if (!inc) return;
+    if (!inc) {
+      // data without a header: the file-start was lost (dropped sealed frame,
+      // stale sender…) — surface it, never stay silent
+      this.notifyUndecryptable(ctx, "orphan");
+      return;
+    }
     inc.chunks.push(body);
     inc.view.bytes += body.byteLength;
     this.recvTotal += body.byteLength;
@@ -791,22 +922,6 @@ export class RoomClient {
     const secs = (performance.now() - inc.startedAt) / 1000;
     v.speed = secs > 0 ? v.size / secs : 0;
     v.bytes = v.size;
-    if (v.kind === "clip") {
-      this.clips = [
-        ...this.clips,
-        {
-          id: v.id,
-          at: v.at,
-          peerId: v.peerId,
-          peerName: v.peerName,
-          kind: "image",
-          mime: v.mime,
-          size: v.size,
-          blobUrl: v.blobUrl,
-          blob,
-        },
-      ];
-    }
     this.schedule();
   }
 
@@ -829,14 +944,15 @@ export class RoomClient {
     const { view, file } = job;
     if (view.status === "cancelled") return;
     view.status = "active";
-    const chunkSize = Math.max(4096, ctx.maxChunk - (this.cipher ? ENC_OVERHEAD : 1));
+    const seal = this.cipher !== null && ctx.e2e;
+    const chunkSize = Math.max(4096, ctx.maxChunk - (seal ? ENC_OVERHEAD : 1));
     await this.sendControl(ctx, {
       t: "file-start",
       id: view.id,
       name: file.name || "file",
       size: file.size,
       mime: file.type || "application/octet-stream",
-      kind: job.kind,
+      g: view.groupId,
     });
     let offset = 0;
     let lastEmitAt = performance.now();
@@ -857,8 +973,8 @@ export class RoomClient {
       if (dc.bufferedAmount > BUFFER_HIGH) await this.waitForDrain(ctx);
       const slice = await file.slice(offset, offset + chunkSize).arrayBuffer();
       const u8 = new Uint8Array(slice);
-      const frame = this.cipher
-        ? await this.cipher.seal(FRAME.CHUNK_ENC, u8)
+      const frame = seal
+        ? await this.cipher!.seal(FRAME.CHUNK_ENC, u8)
         : concatFrame(FRAME.CHUNK, u8);
       try {
         dc.send(frame);

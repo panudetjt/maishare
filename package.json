@@ -2,7 +2,7 @@
   "name": "maishare",
   "version": "0.1.0",
   "private": true,
-  "description": "Local-first, peer-to-peer sharing for files, clipboard, text and pastes over WebRTC",
+  "description": "Local-first, peer-to-peer sharing for files and text chat over WebRTC",
   "type": "module",
   "scripts": {
     "dev": "vp dev",
@@ -15,7 +15,9 @@
   },
   "dependencies": {
     "@tanstack/react-router": "^1.95.0",
+    "fflate": "^0.8.3",
     "jsqr": "^1.4.0",
+    "photoswipe": "^5.4.4",
     "qrcode": "^1.5.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

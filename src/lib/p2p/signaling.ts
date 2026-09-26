@@ -15,23 +15,43 @@ export type ServerMsg =
 
 export type ClientMsg = { t: "signal"; to: string; data: unknown } | { t: "name"; name: string };
 
+/**
+ * How a RoomClient talks to the outside world to set up its mesh. The default
+ * implementation is the WebSocket signaling server; Nearby mode plugs in a
+ * DirectTransport that carries the SDP through QR codes instead — everything
+ * above this interface (mesh, transfers, chat) is shared.
+ */
+export interface RoomTransport {
+  /** wire the client's message/status handlers before connect() */
+  bind(handlers: { onMessage: (m: ServerMsg) => void; onStatus: (s: SignalStatus) => void }): void;
+  connect(): void;
+  send(m: ClientMsg): void;
+  updateName(name: string): void;
+  close(): void;
+}
+
 function wsUrl(): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/ws`;
 }
 
-export class Signaling {
+export class Signaling implements RoomTransport {
   private ws: WebSocket | null = null;
   private closedByUs = false;
   private attempts = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private info: { roomId: string; peerId: string; name: string; probe?: boolean };
+  private handlers: { onMessage: (m: ServerMsg) => void; onStatus: (s: SignalStatus) => void } = {
+    onMessage: () => {},
+    onStatus: () => {},
+  };
 
-  constructor(
-    info: { roomId: string; peerId: string; name: string; probe?: boolean },
-    private handlers: { onMessage: (m: ServerMsg) => void; onStatus: (s: SignalStatus) => void },
-  ) {
+  constructor(info: { roomId: string; peerId: string; name: string; probe?: boolean }) {
     this.info = info;
+  }
+
+  bind(handlers: { onMessage: (m: ServerMsg) => void; onStatus: (s: SignalStatus) => void }) {
+    this.handlers = handlers;
   }
 
   connect() {

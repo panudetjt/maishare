@@ -172,9 +172,15 @@ importers:
       '@tanstack/react-router':
         specifier: ^1.95.0
         version: 1.170.39(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      fflate:
+        specifier: ^0.8.3
+        version: 0.8.3
       jsqr:
         specifier: ^1.4.0
         version: 1.4.0
+      photoswipe:
+        specifier: ^5.4.4
+        version: 5.4.4
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -1883,6 +1889,10 @@ packages:
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
 
+  photoswipe@5.4.4:
+    resolution: {integrity: sha512-WNFHoKrkZNnvFFhbHL93WDkW3ifwVOXSW3w1UuZZelSmgXpIGiZSNlZJq37rR8YejqME2rHs9EhH9ZvlvFH2NA==}
+    engines: {node: '>= 0.12.0'}
+
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
 
@@ -3460,6 +3470,8 @@ snapshots:
   path-to-regexp@6.3.0: {}
 
   pathe@2.0.3: {}
+
+  photoswipe@5.4.4: {}
 
   picocolors@1.1.1: {}
 

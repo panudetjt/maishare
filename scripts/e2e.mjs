@@ -1,6 +1,7 @@
 // End-to-end smoke test: headless Chrome contexts act as peers on one network.
-// Verifies signaling, LAN room discovery, P2P data channel, chat, clipboard
-// and file transfer. Spawns `vite preview` itself (workerd runs
+import { unzipSync } from "fflate";
+// Verifies signaling, LAN room discovery, P2P data channel, chat, pending
+// attachments and file transfer. Spawns `vite preview` itself (workerd runs
 // server/worker.ts), so a fresh `vp build` must exist — or set BASE_URL to
 // point at a running instance:
 //
@@ -123,23 +124,34 @@ try {
   await n2.page.getByText(/connected to/i).waitFor({ timeout: 20_000 });
   ok("nearby devices connected directly", true);
 
+  // files go through the same pending-attachment composer as rooms
   const nearbyPayload = `maishare nearby payload ${Date.now()}\n`.repeat(1000); // ~27 KB
   await n1.page.setInputFiles("input[type=file]", {
     name: "nearby-payload.txt",
     mimeType: "text/plain",
     buffer: Buffer.from(nearbyPayload),
   });
-  await n2.page.locator(".nb-transfer.nb-done").waitFor({ timeout: 30_000 });
+  await n1.page
+    .locator(".attach-chip", { hasText: "nearby-payload.txt" })
+    .waitFor({ timeout: 5000 });
+  await n1.page.getByRole("button", { name: "Send", exact: true }).click();
+  await n2.page.locator(".transfer-done").first().waitFor({ timeout: 30_000 });
   ok("nearby file received", true);
   const [nbDownload] = await Promise.all([
     n2.page.waitForEvent("download", { timeout: 10_000 }),
-    n2.page.getByRole("link", { name: /save nearby-payload/i }).click(),
+    n2.page.getByRole("link", { name: /save/i }).click(),
   ]);
   const nbPath = `/tmp/maishare-nb-${nbDownload.suggestedFilename()}`;
   await nbDownload.saveAs(nbPath);
   const { readFile: nbReadFile } = await import("node:fs/promises");
   const nbContent = await nbReadFile(nbPath, "utf8");
   ok("nearby file matches byte-for-byte", nbContent === nearbyPayload, `${nbContent.length} bytes`);
+
+  // and the chat composer is the same Conversation component rooms use
+  await n1.page.getByRole("textbox", { name: "Message" }).fill("nearby hello");
+  await n1.page.getByRole("button", { name: "Send", exact: true }).click();
+  await n2.page.getByText("nearby hello").waitFor({ timeout: 10_000 });
+  ok("nearby chat works via the room panel", true);
 
   await n1.ctx.close();
   await n2.ctx.close();
@@ -156,52 +168,63 @@ try {
   ok("peers see each other", true);
 
   // ---- chat ----
-  await alice.page.getByLabel("Message").fill("hello from alice");
-  await alice.page.getByRole("button", { name: "Send" }).click();
+  await alice.page.getByRole("textbox", { name: "Message" }).fill("hello from alice");
+  await alice.page.getByRole("button", { name: "Send", exact: true }).click();
   await bob.page.getByText("hello from alice").waitFor({ timeout: 10_000 });
   ok("chat arrives p2p", true);
-  await bob.page.getByLabel("Message").fill("hi alice, bob here");
-  await bob.page.getByRole("button", { name: "Send" }).click();
+  await bob.page.getByRole("textbox", { name: "Message" }).fill("hi alice, bob here");
+  await bob.page.getByRole("button", { name: "Send", exact: true }).click();
   await alice.page.getByText("hi alice, bob here").waitFor({ timeout: 10_000 });
   ok("chat is bidirectional", true);
-  screenshots.push(await alice.page.screenshot({ path: "/tmp/maishare-chat.png" }));
+  await bob.page.locator(".msg-lock.is-sealed").first().waitFor({ timeout: 5000 });
+  ok("sealed messages show the closed lock", true);
 
-  // ---- clipboard: send A's clipboard text to B ----
-  await alice.page.evaluate(() => navigator.clipboard.writeText("secret-launch-code-42"));
-  await alice.page.getByRole("link", { name: "Clipboard" }).click();
-  await alice.page.getByRole("button", { name: /send my clipboard/i }).click();
-  await alice.page.getByText("secret-launch-code-42").waitFor({ timeout: 10_000 });
-  ok("clipboard text sent from alice", true);
-  await bob.page.getByRole("link", { name: "Clipboard" }).click();
-  await bob.page.getByText("secret-launch-code-42").waitFor({ timeout: 10_000 });
-  ok("clipboard text received by bob", true);
-
-  // bob copies it back into his own clipboard
-  await bob.page.getByRole("button", { name: "Copy" }).click();
+  // copy a received message back out from under its bubble
+  await bob.page
+    .locator(".msg", { hasText: "hello from alice" })
+    .getByRole("button", { name: "Copy message" })
+    .click();
   await bob.page
     .getByText("Copied to your clipboard")
-    .or(bob.page.getByText("Copied from"))
-    .waitFor({ timeout: 5000 });
-  const bobClip = await bob.page.evaluate(() => navigator.clipboard.readText());
-  ok("copy-back works", bobClip === "secret-launch-code-42", bobClip);
-  screenshots.push(await bob.page.screenshot({ path: "/tmp/maishare-clipboard.png" }));
+    .waitFor({ timeout: 5000 })
+    .catch(() => {});
+  const copied = await bob.page.evaluate(() => navigator.clipboard.readText());
+  ok("copy under bubble works", copied === "hello from alice", copied);
+  screenshots.push(await alice.page.screenshot({ path: "/tmp/maishare-chat.png" }));
 
-  // ---- file transfer A -> B ----
-  await alice.page.getByRole("link", { name: "Files" }).click();
+  // ---- attachments wait in the composer (Discord-style), send on Enter ----
   const payload = `maishare e2e payload ${Date.now()}\n`.repeat(2000); // ~52 KB
   await alice.page.setInputFiles("input[type=file]", {
     name: "e2e-payload.txt",
     mimeType: "text/plain",
     buffer: Buffer.from(payload),
   });
-  await alice.page.getByText("e2e-payload.txt").first().waitFor({ timeout: 10_000 });
-  await alice.page.locator(".transfer-done").first().waitFor({ timeout: 30_000 });
-  ok("file sent by alice", true);
+  // nothing transfers before Enter: no transfer bubble yet on either side
+  await alice.page
+    .locator(".attach-chip", { hasText: "e2e-payload.txt" })
+    .waitFor({ timeout: 5000 });
+  await bob.page
+    .getByText("e2e-payload.txt")
+    .waitFor({ timeout: 2000 })
+    .then(
+      () => ok("nothing transfers before Enter", false),
+      () => ok("nothing transfers before Enter", true),
+    );
 
-  await bob.page.getByRole("link", { name: "Files" }).click();
-  await bob.page.getByText("e2e-payload.txt").first().waitFor({ timeout: 10_000 });
-  await bob.page.locator(".transfer-done").first().waitFor({ timeout: 30_000 });
-  ok("file received by bob", true);
+  // one message = text + attachments
+  await alice.page.getByRole("textbox", { name: "Message" }).fill("here comes the payload");
+  await alice.page.keyboard.press("Enter");
+  await alice.page.getByText("here comes the payload").waitFor({ timeout: 10_000 });
+  ok("attached message sent by alice", true);
+  await bob.page.getByText("here comes the payload").waitFor({ timeout: 10_000 });
+  await bob.page.locator(".bubble-file.transfer-done").first().waitFor({ timeout: 30_000 });
+  ok("text and file arrive together on bob", true);
+  const combinedMsg = bob.page.locator(".msg", { hasText: "here comes the payload" });
+  ok(
+    "text and attachment share ONE bubble",
+    (await combinedMsg.locator(".bubble").count()) === 1 &&
+      (await combinedMsg.locator(".bubble-file").count()) === 1,
+  );
 
   // download and verify content integrity
   const [download] = await Promise.all([
@@ -214,6 +237,195 @@ try {
   const downloaded = await readFile(tmp, "utf8");
   ok("downloaded file matches byte-for-byte", downloaded === payload, `${downloaded.length} bytes`);
   screenshots.push(await bob.page.screenshot({ path: "/tmp/maishare-files.png" }));
+
+  // ---- file-only message (no text) still transfers on Enter ----
+  const bare = Buffer.from("bare file".repeat(400));
+  await bob.page.setInputFiles("input[type=file]", {
+    name: "bare.txt",
+    mimeType: "text/plain",
+    buffer: bare,
+  });
+  await bob.page.locator(".attach-chip", { hasText: "bare.txt" }).waitFor({ timeout: 5000 });
+  await bob.page.getByRole("button", { name: "Send", exact: true }).click();
+  await alice.page.locator(".bubble-file.transfer-done", { hasText: "bare.txt" }).waitFor({
+    timeout: 30_000,
+  });
+  ok("file-only message received by alice", true);
+
+  // resend pushes the files out again as a fresh message for late joiners
+  await bob.page
+    .locator(".msg", { hasText: "bare.txt" })
+    .getByRole("button", { name: "Resend message" })
+    .click();
+  await bob.page.getByText("Resending 1 file").waitFor({ timeout: 5000 });
+  await alice.page.waitForFunction(
+    () =>
+      [...document.querySelectorAll(".bubble-file.transfer-done .bubble-file-name")].filter(
+        (el) => el.textContent === "bare.txt",
+      ).length >= 2,
+    undefined,
+    { timeout: 30_000 },
+  );
+  ok("resend delivers the file again", true);
+
+  // ---- images sent in one message form one PhotoSwipe gallery ----
+  const pngRed = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const pngClear = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+    "base64",
+  );
+  await alice.page.setInputFiles("input[type=file]", [
+    { name: "pic-a.png", mimeType: "image/png", buffer: pngRed },
+    { name: "pic-b.png", mimeType: "image/png", buffer: pngClear },
+  ]);
+  await alice.page.locator(".attach-chip", { hasText: "pic-b.png" }).waitFor({ timeout: 5000 });
+  await alice.page.getByRole("button", { name: "Send", exact: true }).click();
+  await bob.page.waitForFunction(
+    () => document.querySelectorAll(".bubble-img.is-done").length >= 2,
+    undefined,
+    { timeout: 30_000 },
+  );
+  ok("two images received as one message", true);
+
+  await bob.page.locator(".bubble-img").first().click();
+  await bob.page.getByText("1 / 2").waitFor({ timeout: 10_000 });
+  await bob.page.getByRole("button", { name: "Next" }).click();
+  await bob.page.getByText("2 / 2").waitFor({ timeout: 10_000 });
+  ok("lightbox carousel walks the message group", true);
+  await bob.page.waitForTimeout(400); // let the slide transition settle
+  const [gallerySave] = await Promise.all([
+    bob.page.waitForEvent("download", { timeout: 10_000 }),
+    bob.page.getByRole("button", { name: "Save image" }).click(),
+  ]);
+  ok("save works from the gallery viewer", !!gallerySave);
+
+  // Save all: every image of the message arrives as one zip archive
+  await bob.page.waitForTimeout(400);
+  const [zipDl] = await Promise.all([
+    bob.page.waitForEvent("download", { timeout: 10_000 }),
+    bob.page.locator(".pswp__button--save-all").click(),
+  ]);
+  ok(
+    "save-all produces the gallery zip",
+    zipDl.suggestedFilename() === "maishare-gallery.zip",
+    zipDl.suggestedFilename(),
+  );
+  const zipPath = `/tmp/maishare-${zipDl.suggestedFilename()}`;
+  await zipDl.saveAs(zipPath);
+  const zipped = unzipSync(
+    new Uint8Array(await (await import("node:fs/promises")).readFile(zipPath)),
+  );
+  const names = Object.keys(zipped).sort();
+  ok(
+    "gallery zip holds every image",
+    JSON.stringify(names) === JSON.stringify(["pic-a.png", "pic-b.png"]),
+    names.join(", "),
+  );
+  ok(
+    "zip content matches the original bytes",
+    Buffer.compare(Buffer.from(zipped["pic-a.png"]), pngRed) === 0 &&
+      Buffer.compare(Buffer.from(zipped["pic-b.png"]), pngClear) === 0,
+  );
+  await bob.page.keyboard.press("Escape");
+
+  // save all from under the bubble: same zip, one click, no viewer needed
+  const [bubbleZip] = await Promise.all([
+    bob.page.waitForEvent("download", { timeout: 10_000 }),
+    bob.page
+      .locator(".msg", { has: bob.page.locator(".thumb-cell") })
+      .getByRole("button", { name: "Save all attachments" })
+      .click(),
+  ]);
+  ok(
+    "bubble save-all produces the zip",
+    bubbleZip.suggestedFilename() === "maishare-attachments.zip",
+    bubbleZip.suggestedFilename(),
+  );
+  const bubblePath = `/tmp/maishare-${bubbleZip.suggestedFilename()}`;
+  await bubbleZip.saveAs(bubblePath);
+  const bubbleZipped = unzipSync(
+    new Uint8Array(await (await import("node:fs/promises")).readFile(bubblePath)),
+  );
+  ok(
+    "bubble zip holds every image",
+    JSON.stringify(Object.keys(bubbleZipped).sort()) === JSON.stringify(["pic-a.png", "pic-b.png"]),
+  );
+
+  // ---- a peer without crypto.subtle (iOS Safari on plain http LAN) ----
+  // the host's room is sealed with AES-GCM; before the capability handshake
+  // this peer silently dropped every sealed frame — it must now receive them
+  const iosCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await iosCtx.addInitScript(() => {
+    try {
+      Object.defineProperty(Object.getPrototypeOf(window.crypto), "subtle", {
+        get: () => undefined,
+        configurable: true,
+      });
+    } catch {}
+  });
+  const iosPage = await iosCtx.newPage();
+  const iosUrl = new URL(invite);
+  iosUrl.searchParams.set("name", "ios");
+  await iosPage.goto(iosUrl.href, {
+    waitUntil: "domcontentloaded",
+  });
+  const hasSubtle = await iosPage.evaluate(() => window.crypto.subtle !== undefined);
+  ok("insecure peer really lacks crypto.subtle", !hasSubtle);
+  await alice.page.getByText("2 peers", { exact: true }).waitFor({ timeout: 20_000 });
+
+  await alice.page.getByRole("textbox", { name: "Message" }).fill("hello ios");
+  await alice.page.getByRole("button", { name: "Send", exact: true }).click();
+  await iosPage.getByText("hello ios").waitFor({ timeout: 10_000 });
+  ok("insecure peer receives chat from a sealed room", true);
+  await iosPage.locator(".msg-lock.is-open").first().waitFor({ timeout: 5000 });
+  ok("dtls-only messages show the open lock", true);
+
+  const iosPayload = `maishare ios payload ${Date.now()}\n`.repeat(50);
+  await alice.page.setInputFiles("input[type=file]", {
+    name: "ios-payload.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from(iosPayload),
+  });
+  await alice.page.getByRole("button", { name: "Send", exact: true }).click();
+  await iosPage
+    .locator(".bubble-file.transfer-done", { hasText: "ios-payload.txt" })
+    .waitFor({ timeout: 30_000 });
+  ok("insecure peer receives files from a sealed room", true);
+
+  await iosPage.getByRole("textbox", { name: "Message" }).fill("hello from ios");
+  await iosPage.getByRole("button", { name: "Send", exact: true }).click();
+  await alice.page.getByText("hello from ios").waitFor({ timeout: 10_000 });
+  ok("insecure peer sends chat to the sealed room", true);
+  // the insecure sender must label its OWN message dtls-only (open lock),
+  // matching what the receiver sees — not a green sealed lock
+  await iosPage
+    .locator(".msg", { hasText: "hello from ios" })
+    .locator(".msg-lock.is-open")
+    .waitFor({ timeout: 5000 });
+  ok("insecure sender labels its own message dtls-only", true);
+  await iosCtx.close();
+
+  // ---- wrong-key joiner: unreadable frames must notify BOTH sides ----
+  const rogueCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const rogueUrl = new URL(invite);
+  rogueUrl.searchParams.set("k", "zzzzzzzzzzzzzzzz");
+  rogueUrl.searchParams.set("name", "mallory");
+  const mallory = await rogueCtx.newPage();
+  await mallory.goto(rogueUrl.href, { waitUntil: "domcontentloaded" });
+  await alice.page.getByText("2 peers", { exact: true }).waitFor({ timeout: 20_000 });
+
+  await alice.page.getByRole("textbox", { name: "Message" }).fill("secret to real peers");
+  await alice.page.getByRole("button", { name: "Send", exact: true }).click();
+  await bob.page.getByText("secret to real peers").waitFor({ timeout: 10_000 });
+  ok("real peer still reads sealed rooms normally", true);
+  await mallory.getByText(/could not decrypt this message/i).waitFor({ timeout: 10_000 });
+  ok("wrong-key joiner sees an unreadable-message warning (no silence)", true);
+  await alice.page.getByText(/your message could not be decrypted/i).waitFor({ timeout: 10_000 });
+  ok("sender is told the other side could not decrypt", true);
+  await rogueCtx.close();
 
   // ---- leave ----
   await bob.ctx.close();

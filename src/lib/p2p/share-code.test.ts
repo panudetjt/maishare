@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { packShareCode, unpackShareCode, type ShareCode } from "./qr";
+import { packShareCode, unpackShareCode, type ShareCode } from "./share-code";
 
 const offer: ShareCode = {
   type: "offer",

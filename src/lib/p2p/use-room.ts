@@ -11,7 +11,6 @@ const EMPTY: RoomState = {
   peers: [],
   chats: [],
   transfers: [],
-  clips: [],
   toasts: [],
   sentTotal: 0,
   recvTotal: 0,

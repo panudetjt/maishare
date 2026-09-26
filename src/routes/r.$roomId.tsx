@@ -7,31 +7,17 @@ import {
 } from "@tanstack/react-router";
 import { z } from "zod";
 import { useRoom } from "../lib/p2p/use-room";
-import { loadName, saveName } from "../lib/device";
+import { loadName, saveName, uuid } from "../lib/device";
 import { addRecent } from "../lib/recents";
-import { ChatPanel } from "../components/ChatPanel";
-import { FilesPanel } from "../components/FilesPanel";
-import { ClipboardPanel } from "../components/ClipboardPanel";
+import { Conversation, type PendingFile } from "../components/Conversation";
 import { PeerList } from "../components/PeerList";
 import { QrInvite } from "../components/QrInvite";
 import { Toasts } from "../components/Toasts";
-import {
-  ArrowLeft,
-  ChatIcon,
-  ClipboardIcon,
-  CopyIcon,
-  FileIcon,
-  LockIcon,
-  Logo,
-  QrIcon,
-} from "../components/Icons";
+import { ArrowLeft, CopyIcon, LockIcon, Logo, QrIcon } from "../components/Icons";
 
 export const roomSearchSchema = z.object({
   k: z.string().min(4).max(200).optional().catch(undefined),
-  tab: z.enum(["chat", "files", "clipboard"]).optional().catch("chat"),
   name: z.string().trim().max(32).optional().catch(undefined),
-  q: z.string().max(64).optional().catch(""),
-  sort: z.enum(["recent", "name", "size"]).optional().catch("recent"),
 });
 
 export type RoomSearch = z.output<typeof roomSearchSchema>;
@@ -44,7 +30,6 @@ export const Route = createFileRoute("/r/$roomId")({
     }
     return {
       supported: typeof RTCPeerConnection !== "undefined" && typeof WebSocket !== "undefined",
-      isSecure: window.isSecureContext,
     };
   },
   pendingComponent: RoomPending,
@@ -55,16 +40,16 @@ export const Route = createFileRoute("/r/$roomId")({
 function RoomRoute() {
   const { roomId } = Route.useParams();
   const search = Route.useSearch();
-  const { supported, isSecure } = Route.useLoaderData();
+  const { supported } = Route.useLoaderData();
   const navigate = useNavigate({ from: Route.fullPath });
   const [profileName] = useState(() => loadName());
   const name = search.name ?? profileName;
-  const tab = search.tab ?? "chat";
   const { client, state } = useRoom(roomId, search.k, name);
   const [showQr, setShowQr] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
   const [nameDraft, setNameDraft] = useState(name);
   const [copied, setCopied] = useState(false);
+  const [pending, setPending] = useState<PendingFile[]>([]);
 
   const inviteUrl = `${location.origin}/r/${roomId}${search.k ? `?k=${encodeURIComponent(search.k)}` : ""}`;
 
@@ -72,36 +57,13 @@ function RoomRoute() {
     void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
   };
 
+  // files dropped anywhere on the page wait in the composer like Discord
+  const attach = (files: File[]) =>
+    setPending((prev) => [...prev, ...files.map((file) => ({ id: uuid(), file }))]);
+
   useEffect(() => {
     addRecent({ roomId, k: search.k, at: Date.now() });
   }, [roomId, search.k]);
-
-  // Room-wide paste: files/images are sent as transfers, text as a clipboard
-  // item (except when pasting into the chat composer itself).
-  useEffect(() => {
-    if (!client) return;
-    const onPaste = (e: ClipboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
-      )
-        return;
-      const files = Array.from(e.clipboardData?.files ?? []);
-      if (files.length) {
-        e.preventDefault();
-        client.sendFiles(files, tab === "clipboard" ? "clip" : "file");
-        return;
-      }
-      const text = e.clipboardData?.getData("text/plain") ?? "";
-      if (text.trim() && tab !== "chat") {
-        e.preventDefault();
-        client.sendClipboardText(text);
-      }
-    };
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  }, [client, tab]);
 
   function commitName(v: string) {
     const n = v.trim().slice(0, 32);
@@ -154,8 +116,7 @@ function RoomRoute() {
       onDrop={(e) => {
         e.preventDefault();
         setDragDepth(0);
-        if (e.dataTransfer.files.length && client)
-          client.sendFiles(e.dataTransfer.files, tab === "clipboard" ? "clip" : "file");
+        if (e.dataTransfer.files.length) attach(Array.from(e.dataTransfer.files));
       }}
     >
       <header className="room-header">
@@ -203,35 +164,15 @@ function RoomRoute() {
       <div className="room-body">
         <PeerList state={state} />
         <main className="room-main">
-          <nav className="tabs" aria-label="Room sections">
-            <TabLink roomId={roomId} active={tab === "chat"} tab="chat">
-              <ChatIcon size={15} /> Chat
-            </TabLink>
-            <TabLink roomId={roomId} active={tab === "files"} tab="files">
-              <FileIcon size={15} /> Files
-            </TabLink>
-            <TabLink roomId={roomId} active={tab === "clipboard"} tab="clipboard">
-              <ClipboardIcon size={15} /> Clipboard
-            </TabLink>
-          </nav>
-
           {client ? (
-            <>
-              {tab === "chat" && <ChatPanel client={client} state={state} />}
-              {tab === "files" && (
-                <FilesPanel
-                  client={client}
-                  state={state}
-                  q={search.q ?? ""}
-                  sort={search.sort ?? "recent"}
-                  onQ={(q) => setSearch({ q })}
-                  onSort={(sort) => setSearch({ sort })}
-                />
-              )}
-              {tab === "clipboard" && (
-                <ClipboardPanel client={client} state={state} isSecure={isSecure} />
-              )}
-            </>
+            <Conversation
+              client={client}
+              state={state}
+              pending={pending}
+              onAttach={attach}
+              onDetach={(id) => setPending((prev) => prev.filter((p) => p.id !== id))}
+              onClearPending={() => setPending([])}
+            />
           ) : (
             <div className="panel empty">Connecting…</div>
           )}
@@ -241,12 +182,8 @@ function RoomRoute() {
       {dragDepth > 0 && (
         <div className="drop-overlay" aria-hidden="true">
           <div>
-            <strong>Drop to send</strong>
-            <span>
-              {tab === "clipboard"
-                ? "lands in the clipboard feed"
-                : "straight to every connected peer"}
-            </span>
+            <strong>Drop to attach</strong>
+            <span>files send with your next message</span>
           </div>
         </div>
       )}
@@ -258,30 +195,6 @@ function RoomRoute() {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function TabLink({
-  roomId,
-  tab,
-  active,
-  children,
-}: {
-  roomId: string;
-  tab: "chat" | "files" | "clipboard";
-  active: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <Link
-      to="/r/$roomId"
-      params={{ roomId }}
-      search={(prev) => ({ ...prev, tab })}
-      replace
-      className={`tab ${active ? "tab-active" : ""}`}
-    >
-      {children}
-    </Link>
-  );
 }
 
 function RoomPending() {

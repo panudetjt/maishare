@@ -62,6 +62,15 @@ export function LockIcon(p: IconProps) {
   );
 }
 
+export function LockOpenIcon(p: IconProps) {
+  return (
+    <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 7.9-.9" />
+    </svg>
+  );
+}
+
 export function CopyIcon(p: IconProps) {
   return (
     <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
@@ -76,6 +85,14 @@ export function SendIcon(p: IconProps) {
     <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
       <path d="m22 2-7 20-4-9-9-4 20-7z" />
       <path d="M22 2 11 13" />
+    </svg>
+  );
+}
+
+export function Paperclip(p: IconProps) {
+  return (
+    <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
+      <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
     </svg>
   );
 }
@@ -168,6 +185,25 @@ export function ArrowLeft(p: IconProps) {
   return (
     <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
       <path d="M19 12H5M12 19l-7-7 7-7" />
+    </svg>
+  );
+}
+
+export function SaveAllIcon(p: IconProps) {
+  return (
+    <svg {...base(p.size ?? 14)} aria-hidden="true">
+      <path d="M12 3v8m0 0 3.5-3.5M12 11 8.5 7.5" />
+      <path d="M5 13.5h14" />
+      <path d="M5 17.5h14" />
+    </svg>
+  );
+}
+
+export function RefreshIcon(p: IconProps) {
+  return (
+    <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" />
+      <path d="M21 3v5h-5" />
     </svg>
   );
 }

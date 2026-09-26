@@ -1,6 +1,6 @@
 # maishare
 
-Local-first, **peer-to-peer** sharing for files, clipboard, text chat and pastes.
+Local-first, **peer-to-peer** sharing for files and text chat.
 Devices talk directly over WebRTC data channels — the signaling server only
 introduces peers and never touches payload bytes. No TURN relay anywhere:
 if a direct path exists (same LAN, or NATs that allow hole punching), it is used.
@@ -12,22 +12,21 @@ backend run as **one process** in dev, preview and production.
 
 ## TL;DR (ไทย)
 
-- แชร์ไฟล์ / คลิปบอร์ด / แชท / paste ข้ามเครื่องแบบ **P2P ล้วน** (WebRTC DataChannel, ไม่มี TURN)
+- แชร์ไฟล์ / แชท ข้ามเครื่องแบบ **P2P ล้วน** (WebRTC DataChannel, ไม่มี TURN)
 - เน้น **local-network first**: เปิดผ่าน LAN (`vite --host`) แล้วให้อีกเครื่องสแกน QR
 - ลิงก์เชิญมี room key (`?k=`) — payload ทุกอย่างถูกเข้ารหัส AES-GCM แบบ end-to-end เหนือ DTLS
 - backend เดียวคือ Cloudflare Worker (`server/worker.ts`) — รันใน process เดียวกับ Vite ผ่าน `@cloudflare/vite-plugin` ทั้ง dev/preview และ deploy จริง
 
 ## Features
 
-| Type            | How                                                                                                                                                     |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Files           | Drag & drop / picker / paste anywhere in a room. 64–256 KB chunks, SCTP backpressure (`bufferedamountlow`), live progress + speed, multi-peer broadcast |
-| Clipboard       | "Send my clipboard" reads text or images; incoming text can auto-copy; one-click copy-back                                                              |
-| Text (e2e chat) | Messages go peer-to-peer, AES-GCM sealed with the room key on top of DTLS                                                                               |
-| Pasting         | ⌘/Ctrl+V anywhere in a room: files & images become transfers, text becomes a clipboard item                                                             |
-| LAN discovery   | หน้าแรกแสดงห้องที่กำลังเปิดอยู่ในเครือข่ายเดียวกัน (NAT เดียวกันหรือ subnet เดียวกัน) แบบเรียลไทม์ — คลิกเดียวเข้าห้องได้เลย                            |
-| PWA / offline   | ติดตั้งเป็นแอปได้ (manifest + service worker precache) — เปิดจาก cache ตอนไม่มีเน็ต; signaling/discovery ไม่ถูก cache                                   |
-| Nearby share    | โอนไฟล์ตรงระหว่างสองเครื่องบน Wi-Fi เดียวกันแบบไม่ใช้ server ไม่ต้องมีเน็ต: แลก offer/answer ด้วย QR (`ms1z.` deflate+base64url) บน host-only WebRTC    |
+| Type            | How                                                                                                                                                                                                                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Files           | Attach via paperclip / paste / drag & drop — files wait in the composer and send with your next message. 64–256 KB chunks, SCTP backpressure (`bufferedamountlow`), live progress + speed, multi-peer broadcast                                                                      |
+| Text (e2e chat) | Messages go peer-to-peer, AES-GCM sealed with the room key on top of DTLS                                                                                                                                                                                                            |
+| Conversation UI | One chat-app-style timeline: caption + attachments render as ONE bubble per message with Copy / Resend actions under it (day separators, grouped authors, jump-to-latest); a message's images open as one PhotoSwipe gallery — swipe between them, save one or zip the whole gallery |
+| LAN discovery   | หน้าแรกแสดงห้องที่กำลังเปิดอยู่ในเครือข่ายเดียวกัน (NAT เดียวกันหรือ subnet เดียวกัน) แบบเรียลไทม์ — คลิกเดียวเข้าห้องได้เลย                                                                                                                                                         |
+| PWA / offline   | ติดตั้งเป็นแอปได้ (manifest + service worker precache) — เปิดจาก cache ตอนไม่มีเน็ต; signaling/discovery ไม่ถูก cache                                                                                                                                                                |
+| Nearby share    | โอนไฟล์/แชทกับอีกเครื่องบน Wi-Fi เดียวกันแบบไม่ใช้ server ไม่ต้องมีเน็ต: ใช้ RoomClient ชุดเดิมทั้งหมด ต่างแค่ signaling เดินผ่าน QR (`ms1z.` deflate+base64url)                                                                                                                     |
 
 ## Quick start
 
@@ -66,8 +65,9 @@ A pre-commit hook (`.vite-hooks/`) runs `vp check --fix` on staged files.
 
 - `pnpm run test:e2e` — spawns `vite preview` itself, then drives two headless
   Chrome peers and verifies the whole data plane: signaling through the worker,
-  mesh connect, chat both ways, clipboard send/receive/copy-back, file transfer
-  with byte-for-byte download integrity, and leave propagation (needs `google-chrome`).
+  mesh connect, chat both ways, pending attachments that send with the message,
+  file transfer with byte-for-byte download integrity, and leave propagation
+  (needs `google-chrome`).
 - `vp test` — unit tests for the wire protocol and formatting helpers.
 
 ### Deploying to Cloudflare
@@ -100,10 +100,12 @@ One Durable Object instance per room relays SDP/ICE only — the data path stays
   generated that precaches the app shell (hashed assets + index.html), so an
   installed PWA boots with no network. Signaling/discovery traffic is never
   cached.
-- **Nearby** (`src/lib/nearby/`): two browsers on one LAN exchange a complete
-  host-only SDP offer/answer as QR codes (compressed with `deflate-raw`), then
-  reuse the room wire framing on a direct data channel — no signaling server
-  involved, so it works with no internet at all.
+- **Nearby** (`src/lib/p2p/direct.ts`): a QR handshake replaces the signaling
+  server — a `DirectTransport` implements the same `RoomTransport` interface as
+  the WebSocket client, feeding a normal `RoomClient`. The offer/answer is a
+  complete host-only SDP compressed with `deflate-raw`; ICE never touches the
+  internet. After the handshake, rooms and nearby sessions share everything:
+  mesh negotiation, the wire format, and the unified conversation UI.
 - **Mesh**: every pair of peers gets its own `RTCPeerConnection`
   (perfect-negotiation pattern; deterministic initiator by `peerId` ordering,
   ICE restart once on failure).
@@ -121,8 +123,8 @@ One Durable Object instance per room relays SDP/ICE only — the data path stays
 
 - Route tree is generated (`src/routeTree.gen.ts`, `tanstackRouter` vite plugin with `autoCodeSplitting`)
 - Typed params (`/r/$roomId`) and zod-validated search schemas — room UI state
-  lives in the URL: `?tab=chat|files|clipboard`, `?q=`, `?sort=`, `?name=`, `?k=`
-  (all optional with `.catch()` defaults, so every link and navigation is type-safe)
+  lives in the URL: `?name=`, `?k=` (optional with `.catch()` defaults, so every
+  link and navigation is type-safe)
 - Route loaders validate the room code and report capabilities
 - `defaultPreload: 'intent'` + per-route `pendingComponent` / `errorComponent`
 
@@ -139,8 +141,10 @@ One Durable Object instance per room relays SDP/ICE only — the data path stays
 
 ## Caveats
 
-- Clipboard _reading_ needs a secure context (HTTPS or localhost). Pasting and
-  receiving work everywhere.
+- Peers negotiate end-to-end encryption on join (`hello` carries a
+  `crypto.subtle` capability): a peer on an insecure origin — iOS Safari on
+  plain `http://192.168.x.x` — receives traffic DTLS-encrypted only, while
+  secure-context peers keep AES-GCM on top.
 - Received files buffer in memory (Blob); fine for the LAN-sized payloads this
   is designed for.
 - Cross-network pairs need NAT hole punching to succeed (no TURN by design).

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { LanProbe } from "./p2p/lan-probe";
 import { Signaling } from "./p2p/signaling";
+import { uuid } from "./device";
 
 export interface LanRoom {
   roomId: string;
@@ -45,20 +46,23 @@ function verifyRoom(roomId: string, timeoutMs = 8000): Promise<boolean> {
       onConnected: () => finish(true),
     });
 
-    const sig = new Signaling(
-      { roomId, peerId: `probe-${crypto.randomUUID()}`, name: "discoverer", probe: true },
-      {
-        onStatus: () => {},
-        onMessage: (m) => {
-          if (m.t === "signal") {
-            target = m.from;
-            void probe.onSignal(m.data);
-          } else if (m.t === "probe-empty") {
-            finish(false);
-          }
-        },
+    const sig = new Signaling({
+      roomId,
+      peerId: `probe-${uuid()}`,
+      name: "discoverer",
+      probe: true,
+    });
+    sig.bind({
+      onStatus: () => {},
+      onMessage: (m) => {
+        if (m.t === "signal") {
+          target = m.from;
+          void probe.onSignal(m.data);
+        } else if (m.t === "probe-empty") {
+          finish(false);
+        }
       },
-    );
+    });
 
     timer = setTimeout(() => finish(false), timeoutMs);
     sig.connect();

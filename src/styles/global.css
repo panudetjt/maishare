@@ -740,72 +740,164 @@ input::placeholder {
   font-size: 12px;
 }
 
-/* tabs */
-.tabs {
-  display: inline-flex;
-  gap: 4px;
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 4px;
-  align-self: start;
-}
-.tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 16px;
-  border-radius: 9px;
-  color: var(--dim);
-  font-weight: 600;
-  font-size: 14px;
-  transition:
-    color 0.15s,
-    background 0.15s;
-}
-.tab:hover {
-  color: var(--text);
-}
-.tab-active {
-  color: var(--text);
-  background: var(--card2);
-  box-shadow: inset 0 0 0 1px var(--line2);
-}
+/* tabs removed — the room renders one unified conversation */
 
 .room-main {
   display: flex;
   flex-direction: column;
   gap: 14px;
   min-width: 0;
+  min-height: 0;
 }
 
-/* ---------- chat ---------- */
+/* ---------- conversation (one timeline for chat, files, clipboard) ---------- */
 
-.chat {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 420px;
+/* the room page behaves like a chat app: fixed viewport, the log scrolls */
+.page.room {
+  height: 100%;
+  overflow: hidden;
 }
-.chat-log {
-  flex: 1;
+.room-body {
+  min-height: 0;
+}
+.peers {
+  align-self: stretch;
   overflow-y: auto;
+}
+/* mobile app-shell: full viewport like a native chat app — compact header,
+   no side panels, the conversation fills the screen and scrolls internally */
+@media (max-width: 900px) {
+  .page.room {
+    height: 100vh;
+    height: 100dvh;
+    padding: calc(10px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+    gap: 10px;
+  }
+  .room-header {
+    gap: 8px;
+  }
+  .room-header .brand-sm,
+  .room-header .signal,
+  .room-header .name-field {
+    display: none;
+  }
+  .room-body {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .room-body .peers {
+    display: none;
+  }
+  .conv {
+    padding: 10px 12px 12px;
+  }
+  /* byte totals are noise on a phone, but the peer count is the only
+     visible connection indicator — keep it */
+  .conv .stat {
+    display: none;
+  }
+  .conv .stat-peers {
+    display: inline-flex;
+  }
+}
+.nearby-room .conv {
+  min-height: 520px;
+}
+
+.conv {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 4px 2px;
-  max-height: 52vh;
+  flex: 1;
+  min-height: 0;
+  padding: 14px 16px 16px;
 }
+.conv-head {
+  margin-bottom: 10px;
+  gap: 8px;
+}
+.conv .stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: 12.5px;
+  color: var(--dim);
+}
+.conv .stat svg {
+  color: var(--accent2);
+}
+.conv .progress {
+  height: 5px;
+  background: var(--card2);
+  border-radius: 99px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+.conv .progress-bar {
+  height: 100%;
+  background: var(--grad);
+  border-radius: 99px;
+  transition: width 0.2s ease;
+}
+.conv-head-spacer {
+  flex: 1;
+}
+
+.conv-log-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.conv-log {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 2px 8px;
+}
+.conv-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.day-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 14px 0 8px;
+}
+.day-divider span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim);
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 12px;
+}
+
 .msg {
-  max-width: 72%;
+  max-width: 78%;
+  width: fit-content;
+  align-self: flex-start;
   display: flex;
   flex-direction: column;
   gap: 3px;
+  margin-top: 8px;
+}
+.day-divider + .msg {
+  margin-top: 0;
 }
 .msg-head {
   display: flex;
   gap: 8px;
   align-items: baseline;
+  padding: 0 4px;
 }
 .msg-author {
   font-size: 12.5px;
@@ -819,122 +911,131 @@ input::placeholder {
   font-size: 11px;
   color: var(--dim);
 }
-.msg-body {
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 9px 13px;
-  white-space: pre-wrap;
-  word-break: break-word;
+/* per-message crypto state: closed lock (sealed) / open lock (DTLS only) */
+.msg-lock {
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+}
+.msg-lock.is-sealed {
+  color: var(--ok);
+}
+.msg-lock.is-open {
+  color: var(--warn);
 }
 .msg-mine {
   align-self: flex-end;
   align-items: flex-end;
 }
-.msg-mine .msg-body {
+
+/* per-message actions under the bubble: hover-reveal on pointer devices,
+   softly always-visible on touch (no hover there) */
+.msg-actions {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.msg:hover .msg-actions,
+.msg:focus-within .msg-actions {
+  opacity: 1;
+}
+@media (hover: none) {
+  .msg-actions {
+    opacity: 0.7;
+  }
+}
+.msg-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--dim);
+  padding: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.msg-actions button:hover {
+  color: var(--text);
+  background: var(--bg2);
+}
+
+/* one message = one bubble: optional text part on top, then the attached
+   files stacked inside the same bubble (Discord/Telegram style) */
+.bubble {
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 7px 9px;
+  min-width: 0;
+}
+.bubble-text-part {
+  padding: 3px 5px 6px;
+}
+.bubble-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 268px;
+}
+.bubble-files .bubble-file {
+  flex: 1 1 100%;
+}
+/* the cell anchors the cancel dot and status overlays to the thumbnail */
+.thumb-cell {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  flex: none;
+}
+.bubble-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg-mine .bubble {
   background: rgba(99, 102, 241, 0.14);
   border-color: rgba(99, 102, 241, 0.35);
 }
-.chat-composer {
-  display: flex;
-  gap: 10px;
-  margin-top: 12px;
+/* red bubble = unreadable-frame placeholder, never a silent drop */
+.bubble.bubble-system {
+  background: rgba(248, 113, 113, 0.09);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fca5a5;
 }
-.chat-composer input {
-  flex: 1;
-}
-
-/* ---------- files ---------- */
-
-.stats-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
-}
-.stat {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 5px 13px;
-  font-size: 13px;
-  color: var(--dim);
-}
-.stat svg {
-  color: var(--accent2);
+.bubble-clamped .bubble-line {
+  max-height: 180px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
+  mask-image: linear-gradient(180deg, #000 70%, transparent);
 }
 
-.dropzone {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  text-align: center;
-  padding: 26px 16px;
-  border: 2px dashed var(--line2);
-  border-radius: var(--radius);
-  background: var(--bg2);
-  color: var(--dim);
-  cursor: pointer;
-  transition:
-    border-color 0.15s,
-    background 0.15s;
-}
-.dropzone:hover,
-.dropzone:focus-visible {
-  border-color: var(--accent);
-  color: var(--text);
-}
-.dropzone strong {
-  color: var(--text);
-  font-size: 15px;
-}
-.dropzone svg {
-  color: var(--accent2);
-}
-
-.files-toolbar {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin: 14px 0 10px;
-  flex-wrap: wrap;
-}
-.filter-input {
-  flex: 1;
-  min-width: 160px;
-}
-
-.transfer-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.transfer {
+/* file rows inside a message bubble */
+.bubble-file {
   display: flex;
   align-items: center;
-  gap: 12px;
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 11px 13px;
+  gap: 10px;
+  background: rgba(11, 13, 18, 0.35);
+  border-radius: 10px;
+  padding: 7px 9px;
+  max-width: 100%;
 }
-.transfer-done {
-  border-color: rgba(52, 211, 153, 0.3);
+.msg-mine .bubble-file {
+  background: rgba(11, 13, 18, 0.28);
 }
-.transfer-error,
-.transfer-cancelled {
+.bubble-file.transfer-error,
+.bubble-file.transfer-cancelled {
   opacity: 0.65;
 }
-.transfer-icon {
-  width: 42px;
-  height: 42px;
+.bubble-file-icon {
+  width: 40px;
+  height: 40px;
   flex: none;
   border-radius: 10px;
   background: var(--card2);
@@ -943,116 +1044,289 @@ input::placeholder {
   align-items: center;
   justify-content: center;
   color: var(--dim);
-  overflow: hidden;
 }
-.transfer-icon img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.transfer-main {
+.bubble-file-main {
   flex: 1;
   min-width: 0;
-}
-.transfer-title {
   display: flex;
-  gap: 8px;
-  align-items: baseline;
+  flex-direction: column;
+  gap: 3px;
 }
-.transfer-name {
+.bubble-file-name {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.transfer-peer {
+.bubble-file-meta {
   font-size: 12px;
   color: var(--dim);
-  white-space: nowrap;
 }
-.transfer-meta {
-  font-size: 12.5px;
-  color: var(--dim);
-  margin-top: 2px;
-}
-.progress {
-  height: 5px;
-  background: var(--card2);
-  border-radius: 99px;
-  overflow: hidden;
-  margin-top: 7px;
-}
-.progress-bar {
-  height: 100%;
-  background: var(--grad);
-  border-radius: 99px;
-  transition: width 0.2s ease;
-}
-.transfer-actions {
+.bubble-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  align-self: center;
 }
-.transfer-actions .btn {
-  text-decoration: none;
+.bubble-img {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: zoom-in;
+  border-radius: 10px;
+}
+.thumb-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--line2);
+}
+.bubble-img.is-active .thumb-img,
+.bubble-img.is-queued .thumb-img {
+  opacity: 0.55;
+}
+.bubble-img.is-error .thumb-img,
+.bubble-img.is-cancelled .thumb-img {
+  opacity: 0.45;
+  filter: grayscale(0.4);
+}
+/* circular transfer progress over the thumbnail */
+.thumb-ring {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+.thumb-ring svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.thumb-ring circle {
+  fill: none;
+  stroke-width: 4;
+}
+.ring-track {
+  stroke: rgba(11, 13, 18, 0.6);
+}
+.bubble-img.is-queued .ring-track {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.ring-bar {
+  stroke: var(--accent2);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.2s ease;
+}
+.ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+/* terminal states get a small corner badge */
+.thumb-badge {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid rgba(11, 13, 18, 0.85);
+}
+.badge-error {
+  background: var(--err);
+  color: #fff;
+}
+.badge-cancelled {
+  background: var(--dim);
+  color: #0b0d12;
+}
+/* live speed / waiting hint along the bottom edge */
+.thumb-status {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 8px 3px 2px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.72));
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* cancel affordance while a transfer is live */
+.thumb-x {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--bg);
+  background: #2c3242;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.thumb-x:hover {
+  color: var(--err);
+}
+/* incoming images: no blob exists until every chunk lands */
+.thumb-placeholder {
+  background: var(--card2);
+  border: 1px solid var(--line2);
+  border-radius: 10px;
+  color: var(--dim);
 }
 
-/* ---------- clipboard ---------- */
-
-.toggle {
+.jump-pill {
+  position: absolute;
+  bottom: 14px;
+  right: 16px;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  color: var(--dim);
-  font-size: 13.5px;
+  gap: 6px;
+  background: var(--grad);
+  color: #0b0d12;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
   cursor: pointer;
-  user-select: none;
-}
-.toggle input {
-  accent-color: var(--accent);
+  box-shadow: var(--shadow);
+  animation: rise 0.15s ease;
 }
 
-.clip-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* pending attachments (Discord-style: they send with the next message) */
+.attach-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.attach-chip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  max-width: 240px;
+  animation: rise 0.15s ease;
+}
+.attach-thumb {
+  width: 42px;
+  height: 42px;
+  flex: none;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+}
+.attach-icon {
+  width: 42px;
+  height: 42px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--card2);
+  border: 1px solid var(--line2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dim);
+}
+.attach-info {
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 2px;
 }
-.clip-item {
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 11px 13px;
+.attach-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.clip-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.clip-peer {
+.attach-size {
+  font-size: 11.5px;
   color: var(--dim);
-  font-size: 12.5px;
 }
-.clip-text {
-  margin: 0;
-  font: 13px/1.5 var(--mono);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 220px;
+.attach-x {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+/* the composer stacks: attachments on their own row, input row below —
+   otherwise a few chips squeeze the textarea to zero width on phones */
+.conv-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  min-width: 0;
+}
+.attach-strip {
+  max-height: 158px;
   overflow-y: auto;
-  color: var(--text);
+  align-content: flex-start;
 }
-.clip-image img {
-  display: block;
-  max-width: min(100%, 420px);
-  max-height: 320px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
+.composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.conv-composer textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  line-height: 1.45;
+  overflow-y: auto;
+}
+.conv-composer .btn-icon {
+  width: 38px;
+  height: 38px;
+  flex: none;
+}
+.conv-composer .btn-primary {
+  flex: none;
+}
+
+/* image viewer: PhotoSwipe supplies its own UI; only theme the backdrop and
+   our stroke-based save buttons (they inherit the dim shadow color otherwise) */
+.pswp__bg {
+  background: rgba(11, 13, 18, 0.94);
+}
+.pswp__counter {
+  font-family: var(--mono);
+}
+.pswp__button--save svg,
+.pswp__button--save-all svg {
+  stroke: var(--pswp-icon-color, #fff);
 }
 
 /* ---------- qr popover ---------- */
@@ -1140,6 +1414,8 @@ input::placeholder {
   flex-direction: column;
   gap: 8px;
   z-index: 100;
+  /* toasts are information only — they must never block what is underneath */
+  pointer-events: none;
 }
 .toast {
   display: flex;
@@ -1159,6 +1435,20 @@ input::placeholder {
 }
 .toast-success {
   border-color: rgba(52, 211, 153, 0.5);
+}
+/* on phones the composer owns the bottom edge and the header the top —
+   toasts appear centered just below the header, over the (non-interactive)
+   conversation stats, so they never cover a control */
+@media (max-width: 900px) {
+  .toasts {
+    top: calc(env(safe-area-inset-top) + 54px);
+    right: auto;
+    bottom: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    align-items: center;
+    max-width: min(92vw, 340px);
+  }
 }
 
 /* ---------- misc ---------- */
