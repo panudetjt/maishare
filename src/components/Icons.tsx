@@ -239,3 +239,41 @@ export function ArrowDown(p: IconProps) {
     </svg>
   );
 }
+
+export function VideoIcon(p: IconProps) {
+  return (
+    <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
+      <path d="m22 8-6 4 6 4V8Z" />
+      <rect x="2" y="6" width="14" height="12" rx="2" />
+    </svg>
+  );
+}
+
+export function AudioIcon(p: IconProps) {
+  return (
+    <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
+      <path d="M9 18V5l12-2v13" />
+      <circle cx="6" cy="18" r="3" />
+      <circle cx="18" cy="16" r="3" />
+    </svg>
+  );
+}
+
+export function ArchiveIcon(p: IconProps) {
+  return (
+    <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
+      <rect x="2" y="3" width="20" height="5" rx="1" />
+      <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+      <path d="M10 12h4" />
+    </svg>
+  );
+}
+
+export function CodeIcon(p: IconProps) {
+  return (
+    <svg {...base(p.size ?? 16)} className={p.class} aria-hidden="true">
+      <path d="m16 18 6-6-6-6" />
+      <path d="m8 6-6 6 6 6" />
+    </svg>
+  );
+}

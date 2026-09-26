@@ -13,11 +13,15 @@ import PhotoSwipeLightbox from "photoswipe/lightbox";
 import "photoswipe/style.css";
 import type { RoomClient, RoomState, TransferView } from "../lib/p2p/room-client";
 import { buildTimeline, dayLabel, type TimelineMessage } from "../lib/timeline";
+import { withDetectedExtension } from "../lib/magika";
 import { formatBytes, formatClock, formatSpeed } from "../lib/format";
 import {
   ArrowDown,
   ArrowUp,
+  ArchiveIcon,
+  AudioIcon,
   ChatIcon,
+  CodeIcon,
   CopyIcon,
   DownloadIcon,
   FileIcon,
@@ -29,6 +33,7 @@ import {
   SaveAllIcon,
   SendIcon,
   TrashIcon,
+  VideoIcon,
   XIcon,
 } from "./Icons";
 
@@ -164,6 +169,18 @@ function renderedSizeOf(blobUrl: string): SlideData {
   };
 }
 
+/** icon by detected content group (Magika), falling back to the mime prefix
+ * while the sniff hasn't landed yet */
+function FileTypeIcon({ t, size = 20 }: { t: TransferView; size?: number }) {
+  const g = t.detected?.group;
+  if (g === "image" || (!g && t.mime.startsWith("image/"))) return <ImageIcon size={size} />;
+  if (g === "video" || (!g && t.mime.startsWith("video/"))) return <VideoIcon size={size} />;
+  if (g === "audio" || (!g && t.mime.startsWith("audio/"))) return <AudioIcon size={size} />;
+  if (g === "archive") return <ArchiveIcon size={size} />;
+  if (g === "code") return <CodeIcon size={size} />;
+  return <FileIcon size={size} />;
+}
+
 export function Conversation({
   client,
   state,
@@ -294,7 +311,9 @@ export function Conversation({
 
   const saveAllAttachments = useCallback(
     async (m: TimelineMessage) => {
-      const items = m.files.filter((f) => f.blob).map((f) => ({ name: f.name, blob: f.blob! }));
+      const items = m.files
+        .filter((f) => f.blob)
+        .map((f) => ({ name: withDetectedExtension(f.name, f.detected), blob: f.blob! }));
       if (!items.length) return;
       await zipBlobs(items, "maishare-attachments.zip");
       client.toast(
@@ -740,12 +759,11 @@ function ImageCell({
 /** non-image attachments keep the classic row: icon, name, status, actions */
 function FileRow({ t, onCancel }: { t: TransferView; onCancel: (id: string) => void }) {
   const active = t.status === "active" || t.status === "queued";
-  const isImage = t.mime.startsWith("image/");
   const pct = t.size > 0 ? Math.min(100, Math.round((t.bytes / t.size) * 100)) : 0;
   return (
     <div className={`bubble-file transfer-${t.status}`}>
       <span className="bubble-file-icon">
-        {isImage ? <ImageIcon size={20} /> : <FileIcon size={20} />}
+        <FileTypeIcon t={t} />
       </span>
       <div className="bubble-file-main">
         <span className="bubble-file-name" title={t.name}>
@@ -771,7 +789,7 @@ function FileRow({ t, onCancel }: { t: TransferView; onCancel: (id: string) => v
           <a
             className="btn-icon"
             href={t.blobUrl}
-            download={t.name}
+            download={withDetectedExtension(t.name, t.detected)}
             aria-label={`Save ${t.name}`}
             title="Save"
           >

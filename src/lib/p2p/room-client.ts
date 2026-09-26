@@ -1,4 +1,5 @@
 import { platformLabel, uuid } from "../device";
+import { resolveMime, sniffBlob, sniffBytes, suspiciousMismatch, type SniffInfo } from "../magika";
 import { concatFrame, decoder, encoder, ENC_OVERHEAD, FRAME, type Control } from "./protocol";
 import { RoomCipher } from "./crypto";
 import { Signaling, type RoomTransport, type SignalStatus } from "./signaling";
@@ -56,6 +57,9 @@ export interface TransferView {
   sealed?: boolean;
   blobUrl?: string;
   blob?: Blob;
+  /** content-derived type from Magika sniffing — absent until the wasm runs
+   * or when it could not be loaded */
+  detected?: SniffInfo;
 }
 
 export interface Toast {
@@ -125,6 +129,23 @@ function rid(): string {
   return uuid();
 }
 
+/** leading bytes across received chunks, bounded for sniffing */
+function headBytes(chunks: Uint8Array[], max: number): Uint8Array {
+  const total = Math.min(
+    max,
+    chunks.reduce((n, c) => n + c.length, 0),
+  );
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    if (off >= total) break;
+    const n = Math.min(c.length, total - off);
+    out.set(c.subarray(0, n), off);
+    off += n;
+  }
+  return out;
+}
+
 /** Wait for host-candidate gathering so localDescription is a complete SDP. */
 function gathered(pc: RTCPeerConnection, timeoutMs = 1500): Promise<void> {
   if (pc.iceGatheringState === "complete") return Promise.resolve();
@@ -158,6 +179,8 @@ export class RoomClient {
   private readonly peers = new Map<string, PeerCtx>();
   /** in-flight discovery verification probes, keyed by the prober's id */
   private readonly probes = new Map<string, LanProbe>();
+  /** one content-sniff job per outgoing transfer, keyed by transfer id */
+  private readonly sniffJobs = new Map<string, Promise<void>>();
   private readonly outJobs = new Map<string, Set<SendJob>>();
   private deferred: { view: TransferView; file: File }[] = [];
   /** chat frames sent while no peer was connected, flushed on the first open */
@@ -354,6 +377,9 @@ export class RoomClient {
         ...(isImage ? { blobUrl: URL.createObjectURL(file) } : {}),
       };
       this.transfers = [view, ...this.transfers];
+      // content-type sniffing kicks off immediately so queued/deferred files
+      // already show the right preview and icon
+      void this.sniffTransfer(view, file);
       if (openPeers.length) {
         for (const ctx of openPeers) this.enqueue(ctx, view, file);
       } else {
@@ -364,6 +390,29 @@ export class RoomClient {
       this.toast("Waiting for a peer — files will send automatically when someone joins", "info");
     }
     this.schedule();
+  }
+
+  /**
+   * Identify the file's real type from its bytes (Magika wasm, lazy-loaded)
+   * and patch the view in place: mime, detected info, and a preview URL when
+   * it turns out to be an image. One job per transfer id; runJob awaits it so
+   * the file-start frame carries the sniffed mime.
+   */
+  private sniffTransfer(view: TransferView, file: Blob): Promise<void> {
+    let job = this.sniffJobs.get(view.id);
+    if (job) return job;
+    job = (async () => {
+      const info = await sniffBlob(file);
+      if (this.disposed || !info) return;
+      view.detected = info;
+      view.mime = resolveMime(view.mime, info);
+      if (view.mime.startsWith("image/") && !view.blobUrl) {
+        view.blobUrl = URL.createObjectURL(file);
+      }
+      this.schedule();
+    })();
+    this.sniffJobs.set(view.id, job);
+    return job;
   }
 
   cancelTransfer(id: string) {
@@ -418,6 +467,7 @@ export class RoomClient {
     this.peers.clear();
     for (const probe of this.probes.values()) probe.close();
     this.probes.clear();
+    this.sniffJobs.clear();
     for (const t of this.transfers) if (t.blobUrl) URL.revokeObjectURL(t.blobUrl);
     if (this.emitTimer) clearTimeout(this.emitTimer);
     this.listeners.clear();
@@ -915,13 +965,29 @@ export class RoomClient {
     if (!inc || inc.view.id !== id) return;
     ctx.incoming = null;
     const v = inc.view;
-    const blob = new Blob(inc.chunks, { type: v.mime });
-    v.blob = blob;
-    v.blobUrl = URL.createObjectURL(blob);
+    const chunks = inc.chunks;
     v.status = "done";
     const secs = (performance.now() - inc.startedAt) / 1000;
     v.speed = secs > 0 ? v.size / secs : 0;
     v.bytes = v.size;
+    // blob assembly waits for the content sniff so the Blob, the preview URL
+    // and the timeline render from verified bytes, not the sender's claim
+    void this.verifyIncoming(v, chunks);
+    this.schedule();
+  }
+
+  private async verifyIncoming(v: TransferView, chunks: Uint8Array<ArrayBuffer>[]) {
+    const info = await sniffBytes(headBytes(chunks, 64 * 1024));
+    if (this.disposed || !this.transfers.includes(v)) return;
+    if (info) {
+      v.detected = info;
+      v.mime = resolveMime(v.mime, info);
+      const warn = suspiciousMismatch(v.name, info);
+      if (warn) this.toast(warn, "error");
+    }
+    const blob = new Blob(chunks, { type: v.mime });
+    v.blob = blob;
+    v.blobUrl = URL.createObjectURL(blob);
     this.schedule();
   }
 
@@ -943,6 +1009,9 @@ export class RoomClient {
   private async runJob(ctx: PeerCtx, job: SendJob) {
     const { view, file } = job;
     if (view.status === "cancelled") return;
+    // the header names the transfer for the receiver — make sure the sniffed
+    // mime (not the browser's extension guess) is what goes on the wire
+    await this.sniffTransfer(view, file);
     view.status = "active";
     const seal = this.cipher !== null && ctx.e2e;
     const chunkSize = Math.max(4096, ctx.maxChunk - (seal ? ENC_OVERHEAD : 1));
@@ -951,7 +1020,7 @@ export class RoomClient {
       id: view.id,
       name: file.name || "file",
       size: file.size,
-      mime: file.type || "application/octet-stream",
+      mime: view.mime,
       g: view.groupId,
     });
     let offset = 0;
