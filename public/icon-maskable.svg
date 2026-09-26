@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="g" x1="150" y1="110" x2="370" y2="410" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#818cf8" />
+      <stop offset="1" stop-color="#22d3ee" />
+    </linearGradient>
+  </defs>
+  <!-- full-bleed background: the safe zone (inner 80%) only holds the bolt -->
+  <rect width="512" height="512" fill="#10131b" />
+  <path d="M280 128 172 280h72l-20 104 118-160h-78l16-96z" fill="url(#g)" />
+</svg>

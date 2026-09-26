@@ -1,0 +1,19 @@
+# pnpm 12 supply-chain hardening (settings live here, not in package.json)
+allowBuilds:
+  # only explicitly trusted build scripts run (pnpm blocks the rest by default)
+  esbuild: true
+  workerd: true
+# resolve transitive deps from the registry only — no git URLs / tarballs
+blockExoticSubdeps: true
+# refuse packages whose trust level dropped vs previous releases
+trustPolicy: no-downgrade
+# old releases predate provenance/signatures, so the trust check only applies
+# to packages published within the last year (e.g. semver@6.3.1 from 2023)
+trustPolicyIgnoreAfter: 525600
+overrides:
+  # vite resolves to the vite-plus core so every consumer (including the
+  # tanstack router plugin's peer) shares one Vite instance
+  vite: npm:@voidzero-dev/vite-plus-core@1.0.0-rc.0
+# minimumReleaseAge keeps its pnpm default (1440 min) and is strict, with no
+# per-release exclusions — direct deps that publish faster than the window
+# are pinned to their newest sufficiently-aged release instead

@@ -1,0 +1,48 @@
+{
+  "name": "maishare",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first, peer-to-peer sharing for files, clipboard, text and pastes over WebRTC",
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "vp build && node scripts/pwa-build.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p server",
+    "test:e2e": "node scripts/e2e.mjs",
+    "preview": "vp preview",
+    "deploy": "vp build && node scripts/pwa-build.mjs && wrangler deploy",
+    "prepare": "vp config"
+  },
+  "dependencies": {
+    "@tanstack/react-router": "^1.95.0",
+    "jsqr": "^1.4.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.59.0",
+    "@cloudflare/workers-types": "5.20260924.1",
+    "@tanstack/router-plugin": "^1.95.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "playwright-core": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0-rc.0",
+    "vite-plus": "1.0.0-rc.0",
+    "wrangler": "^4.138.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.6.0",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
+  }
+}

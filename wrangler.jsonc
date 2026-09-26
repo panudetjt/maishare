@@ -1,0 +1,27 @@
+// maishare runs as a single Cloudflare Worker: the SPA is served as static
+// assets, /ws is the signaling WebSocket backed by the Room Durable
+// Object (one instance per room id) and /api/discover lists LAN rooms via
+// the Lobby DO. Payloads stay P2P — the DOs only relay WebRTC handshakes.
+// The @cloudflare/vite-plugin wires the client build output as the assets
+// directory automatically (in dev, preview and deploy), so no `directory`
+// is set here.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "maishare",
+  "main": "server/worker.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS",
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOM", "class_name": "Room" },
+      { "name": "LOBBY", "class_name": "Lobby" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Room"] },
+    { "tag": "v2", "new_sqlite_classes": ["Lobby"] },
+  ],
+}

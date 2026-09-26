@@ -1,0 +1,106 @@
+export type SignalStatus = "connecting" | "online" | "offline";
+
+export type ServerMsg =
+  | { t: "welcome"; you: string; peers: { peerId: string; name: string }[]; addresses: string[] }
+  | { t: "peer-join"; peerId: string; name: string }
+  | { t: "peer-leave"; peerId: string }
+  | { t: "peer-name"; peerId: string; name: string }
+  | { t: "signal"; from: string; data: unknown }
+  // discovery: the DO asks a member to verify a prober over a host-only
+  // connection (`from` is the prober's peer id); probers in empty rooms get
+  // an immediate dead end
+  | { t: "probe-request"; from: string }
+  | { t: "probe-empty" }
+  | { t: "error"; message: string };
+
+export type ClientMsg = { t: "signal"; to: string; data: unknown } | { t: "name"; name: string };
+
+function wsUrl(): string {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/ws`;
+}
+
+export class Signaling {
+  private ws: WebSocket | null = null;
+  private closedByUs = false;
+  private attempts = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private info: { roomId: string; peerId: string; name: string; probe?: boolean };
+
+  constructor(
+    info: { roomId: string; peerId: string; name: string; probe?: boolean },
+    private handlers: { onMessage: (m: ServerMsg) => void; onStatus: (s: SignalStatus) => void },
+  ) {
+    this.info = info;
+  }
+
+  connect() {
+    this.closedByUs = false;
+    this.open();
+  }
+
+  private open() {
+    this.handlers.onStatus("connecting");
+    let ws: WebSocket;
+    try {
+      // identity travels in the handshake URL — both the node server and the
+      // Cloudflare worker read room/peer/name from query params on upgrade
+      const params = new URLSearchParams({
+        room: this.info.roomId,
+        peer: this.info.peerId,
+        name: this.info.name,
+      });
+      if (this.info.probe) params.set("probe", "1");
+      ws = new WebSocket(`${wsUrl()}?${params}`);
+    } catch {
+      this.retry();
+      return;
+    }
+    this.ws = ws;
+    ws.onopen = () => {
+      this.attempts = 0;
+      this.handlers.onStatus("online");
+    };
+    ws.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(String(ev.data)) as ServerMsg;
+        this.handlers.onMessage(m);
+      } catch {
+        // ignore malformed frames
+      }
+    };
+    ws.onclose = () => {
+      this.ws = null;
+      if (!this.closedByUs) {
+        this.handlers.onStatus("offline");
+        this.retry();
+      }
+    };
+    ws.onerror = () => {};
+  }
+
+  private retry() {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    const delay = Math.min(15_000, 500 * 2 ** this.attempts++);
+    this.retryTimer = setTimeout(() => this.open(), delay);
+  }
+
+  send(m: ClientMsg) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(m));
+    }
+  }
+
+  updateName(name: string) {
+    this.info = { ...this.info, name };
+    this.send({ t: "name", name });
+  }
+
+  close() {
+    this.closedByUs = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    try {
+      this.ws?.close();
+    } catch {}
+  }
+}
