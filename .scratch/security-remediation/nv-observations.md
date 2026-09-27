@@ -68,21 +68,32 @@ scripts/nv/nv02-lobby-load.mjs`. The audit's ~225k-pair linearity harness is
 
 - [x] Local half done: navigated `/r/<room>?k=<canary>` twice against a local
       workerd (`scripts/nv/nv03-query-log.mjs`), grepped the captured log.
-- Result: **local request logs do NOT capture the query-string key; Workers
-  Observability now ENABLED on staging — dashboard search pending (owner)**
+- [x] Staging observability half done: owner supplied one real invocation-log
+      record from `maishare-nv-staging` Workers Observability.
+- Result: **VALIDATED — Workers Observability invocation logs capture the full
+  query string, structured and searchable; escalate to the fragment-key
+  (`#k=`) design (ticket 14)**
 - Date: 2026-09-27 · Deciding facts: wrangler's request log line renders as
   `GET /healthz 200 OK` — path only, no query — and no log line contained the
   canary key, while the navigations themselves returned 200. Staging
   `maishare-nv-staging` was redeployed with `observability.enabled = true` and
   the canary navigation `/r/nv03canary?k=nvcannotkeepthiskey42` was sent.
-- Evidence: script output; rerun locally: `node scripts/nv/nv03-query-log.mjs`.
-- Owner step (2 minutes): dashboard → maishare-nv-staging → Workers
-  Observability → Events, search **`nvcannotkeepthiskey42`**. If any event's
-  request URL carries `?k=…` → a persistent logging layer captures keys →
-  escalate to the fragment-key (`#k=`) design; otherwise fragment-key stays
-  optional defense-in-depth. (The telemetry query API rejected wrangler's
-  OAuth token — auth error 10000 — so the Events search is the owner step.)
-  Also review any Logpush / analytics export / fronting proxy on the real zone.
+- Evidence (deciding record, 2026-09-27): one invocation-log event for
+  `GET /r/probe-get-1790513695?cb=27291` shows the query captured in THREE
+  places — `message` (full URL), `$workers.event.request.url`, and
+  `$workers.event.search` (`{"cb":27291}`, a structured, filterable field).
+  Whatever `?cb` gets, `?k=` gets identically. (Note: `search.cb` was even
+  coerced to a number — the field is parsed, not a raw string.)
+- Also confirmed: local workerd request lines do NOT capture the query
+  (`GET /healthz 200 OK` style) — the capture is specific to observability
+  invocation logs, which are enabled on staging since today.
+- Owner follow-ups: decide observability retention (keys would sit readable
+  for the retention window) and whether production keeps observability enabled
+  at all. The only keys currently in staging logs are test values
+  (`nvcannotkeepthiskey42`, probe cbs) — they die with the staging worker.
+- Countermeasure (warranted): fragment-key (`#k=`) design → written up as
+  ticket `issues/14-fragment-key.md`. Fragments never reach the server, so no
+  logging layer on any ingress can ever capture the key.
 
 ## NV-04 — Room DO persistence
 
