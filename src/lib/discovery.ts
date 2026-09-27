@@ -5,9 +5,11 @@ import { uuid } from "./device";
 
 export interface LanRoom {
   roomId: string;
-  people: number;
-  names: string[];
-  since: number;
+  /** roster content is withheld (absent) unless the IP relation provably
+   * implies a shared network — SEC-07 id-only candidates carry just the id */
+  people?: number;
+  names?: string[];
+  since?: number;
 }
 
 export type DiscoveryStatus = "loading" | "live" | "offline";

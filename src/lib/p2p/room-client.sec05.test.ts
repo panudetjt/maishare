@@ -82,7 +82,7 @@ describe("mesh fan-out caps (SEC-05)", () => {
   });
 
   it("evicts a peer still connecting past the timeout with no remote description", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearInterval", "setInterval", "Date"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearInterval", "setInterval", "performance"] });
     try {
       await h.client.start();
       const peer = h.addPeer(POLITE_PEER);
@@ -99,7 +99,7 @@ describe("mesh fan-out caps (SEC-05)", () => {
   });
 
   it("keeps a peer whose negotiation is progressing (remote description arrived)", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearInterval", "setInterval", "Date"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearInterval", "setInterval", "performance"] });
     try {
       await h.client.start();
       h.addPeer(POLITE_PEER);

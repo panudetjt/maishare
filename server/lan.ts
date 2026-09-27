@@ -100,14 +100,6 @@ export function sameLan(a: string, b: string): boolean {
 }
 
 /**
- * SEC-07: does this pair's relation PROVE a shared network topology?
- * Topology-provable relations — private IPv4 in one /24, v4-mapped equality
- * over private ranges, one IPv6 /64, and the loopback dev marker — do. A bare
- * public-IPv4 exact match proves nothing (two homes behind one CGNAT share
- * the same address), so it is a discovery *candidate* but never proves enough
- * to disclose roster content.
- */
-/**
  * SEC-10: only a syntactically valid IPv4 or IPv6 address may act as a
  * network identity. Arbitrary strings — including the 'local' fallback
  * marker — fail closed, so they can never be supplied by an external request
@@ -120,6 +112,14 @@ export function isValidIp(s: string): boolean {
   return v6Groups(t) != null;
 }
 
+/**
+ * SEC-07: does this pair's relation PROVE a shared network topology?
+ * Topology-provable relations — private IPv4 in one /24, v4-mapped equality
+ * over private ranges, one IPv6 /64, and the loopback dev marker — do. A bare
+ * public-IPv4 exact match proves nothing (two homes behind one CGNAT share
+ * the same address), so it is a discovery *candidate* but never proves enough
+ * to disclose roster content.
+ */
 export function provableLan(a: string, b: string): boolean {
   if (!a || !b) return false;
   a = a.trim().toLowerCase();

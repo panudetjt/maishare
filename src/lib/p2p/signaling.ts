@@ -89,6 +89,10 @@ export class Signaling implements RoomTransport {
         name: this.info.name,
       });
       if (this.info.probe) params.set("probe", "1");
+      // the ownership token rides the handshake URL like the room/peer identity
+      // it protects — the WebSocket API offers no header channel on browsers.
+      // Exposure is bounded: it authorizes only this peer id in this room, and
+      // the same access logs would already carry the room id and peer id.
       if (this.info.token) params.set("token", this.info.token);
       ws = new WebSocket(`${wsUrl()}?${params}`);
     } catch {

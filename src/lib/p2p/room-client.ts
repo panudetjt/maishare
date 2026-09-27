@@ -43,6 +43,9 @@ export const INCOMING_START_COOLDOWN_MS = 1000;
 /** an inbound transfer with no chunk progress for this long has stalled and is
  * failed by the watchdog riding the per-peer ping interval (SEC-04) */
 export const INCOMING_STALE_MS = 30_000;
+/** file-cancel reason sent back when a transfer is retired as stale — one
+ * string shared by the watchdog and the bulk Clear */
+export const STALE_CANCEL_REASON = "stalled";
 
 /** roster-driven mesh fan-out cap (SEC-05): peer contexts beyond this stay
  * inert — no RTCPeerConnection, no data channel, no offers */
@@ -184,7 +187,7 @@ interface PeerCtx {
   withheldFiles: { view: TransferView; file: File }[];
   /** after a bounced file-start, further starts wait out the cooldown */
   startBlockedUntil: number;
-  /** when the peer context was allocated — drives the phantom-join sweep */
+  /** when the peer context was allocated (monotonic) — drives the phantom-join sweep */
   createdAt: number;
   /** one unreadable-frame warning per connection — no toast storms */
   undecryptableWarned: boolean;
@@ -530,14 +533,17 @@ export class RoomClient {
   clearFinishedTransfers() {
     // SEC-04: stale inbound 'active' entries are retired too, so the Clear
     // action always bounds the list; dropped entries release their URLs
-    const now = performance.now();
     const stale = new Set<string>();
     for (const p of this.peers.values()) {
       const inc = p.incoming;
-      if (inc && now - inc.lastProgress > INCOMING_STALE_MS) {
+      if (inc && this.isIncomingStale(inc)) {
         stale.add(inc.view.id);
         p.incoming = null;
-        void this.sendControl(p, { t: "file-cancel", id: inc.view.id, reason: "stale" });
+        void this.sendControl(p, {
+          t: "file-cancel",
+          id: inc.view.id,
+          reason: STALE_CANCEL_REASON,
+        });
       }
     }
     const keep = this.transfers.filter(
@@ -634,10 +640,7 @@ export class RoomClient {
         const p = this.peers.get(m.peerId);
         if (p) {
           this.toast(`${p.name} left`, "info");
-          this.teardownPeer(p);
-          this.peers.delete(m.peerId);
-          this.consents = this.consents.filter((q) => q.peerId !== m.peerId);
-          this.schedule();
+          this.removePeer(p);
         }
         break;
       }
@@ -730,7 +733,7 @@ export class RoomClient {
       withheldChats: [],
       withheldFiles: [],
       startBlockedUntil: 0,
-      createdAt: Date.now(),
+      createdAt: performance.now(),
       undecryptableWarned: false,
     };
     pc.onicecandidate = ({ candidate }) => {
@@ -761,10 +764,7 @@ export class RoomClient {
         } else {
           // SEC-05: a failed connection releases its context instead of
           // persisting forever
-          this.teardownPeer(ctx);
-          this.peers.delete(ctx.peerId);
-          this.consents = this.consents.filter((q) => q.peerId !== ctx.peerId);
-          this.schedule();
+          this.removePeer(ctx);
         }
       }
     };
@@ -877,13 +877,17 @@ export class RoomClient {
    * forever, so even without user action nothing is immune to cleanup */
   private sweepIncoming(ctx: PeerCtx) {
     const inc = ctx.incoming;
-    if (!inc || performance.now() - inc.lastProgress <= INCOMING_STALE_MS) return;
+    if (!inc || !this.isIncomingStale(inc)) return;
     ctx.incoming = null;
     inc.view.status = "error";
     this.toast(`"${inc.view.name}" stalled — no data for a while, transfer failed`, "error");
     // the sender is still pumping into a dead transfer — tell it
-    void this.sendControl(ctx, { t: "file-cancel", id: inc.view.id, reason: "stalled" });
+    void this.sendControl(ctx, { t: "file-cancel", id: inc.view.id, reason: STALE_CANCEL_REASON });
     this.schedule();
+  }
+
+  private isIncomingStale(inc: Incoming): boolean {
+    return performance.now() - inc.lastProgress > INCOMING_STALE_MS;
   }
 
   /** may payload frames (chat, file-start, chunks) be delivered to this peer? */
@@ -901,11 +905,9 @@ export class RoomClient {
       if (
         ctx.status === "connecting" &&
         !ctx.pc.remoteDescription &&
-        now - ctx.createdAt > CONNECT_TIMEOUT_MS
+        performance.now() - ctx.createdAt > CONNECT_TIMEOUT_MS
       ) {
-        this.teardownPeer(ctx);
-        this.peers.delete(peerId);
-        this.consents = this.consents.filter((q) => q.peerId !== peerId);
+        this.removePeer(ctx);
         changed = true;
       }
     }
@@ -1461,6 +1463,14 @@ export class RoomClient {
       [...jobs].some((j) => jobs.size && j.view.peerId === ctx.peerId),
     );
     for (const [id] of dead) this.outJobs.delete(id);
+  }
+
+  /** drop a peer from the mesh: teardown, map removal, stale consent prompts */
+  private removePeer(p: PeerCtx) {
+    this.teardownPeer(p);
+    this.peers.delete(p.peerId);
+    this.consents = this.consents.filter((q) => q.peerId !== p.peerId);
+    this.schedule();
   }
 
   private teardownPeer(p: PeerCtx) {
