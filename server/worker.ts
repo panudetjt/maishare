@@ -49,6 +49,12 @@ type SignalMessage =
   | { t: "name"; name: string }
   | { t: "leave" };
 
+/** managed Rate Limiting API binding (see "unsafe.bindings" in wrangler.jsonc;
+ * the limit window itself is declared in config, not per call) */
+interface RateLimitBinding {
+  limit(opts: { key: string }): Promise<{ success: boolean }>;
+}
+
 interface Env {
   /** one Durable Object instance per room id */
   ROOM: DurableObjectNamespace;
@@ -60,6 +66,24 @@ interface Env {
    * (comma-separated; only needed when signaling lives behind a different
    * host than the page — same-origin covers every default deployment) */
   ALLOWED_ORIGINS?: string;
+  /** per-IP request-rate gates on the floodable endpoints (fail-open) */
+  RATE_LIMITER_WS?: RateLimitBinding;
+  RATE_LIMITER_DISCOVER?: RateLimitBinding;
+}
+
+/**
+ * Per-key request-rate check for the endpoints that need frequency limits
+ * (caps elsewhere bound what ONE request can do; this bounds HOW OFTEN).
+ * Any binding failure fails open — the app never breaks because of its own
+ * guard, and local/test envs without the binding just skip it.
+ */
+async function allowRate(binding: RateLimitBinding | undefined, key: string): Promise<boolean> {
+  if (!binding) return true;
+  try {
+    return (await binding.limit({ key })).success !== false;
+  } catch {
+    return true;
+  }
 }
 
 /** what a Room DO reports to the Lobby */
@@ -487,11 +511,28 @@ export default {
       if (!originAllowed(req, url, env)) {
         return new Response("origin not allowed", { status: 403 });
       }
+      if (
+        !(await allowRate(
+          env.RATE_LIMITER_WS,
+          `ws:${req.headers.get("CF-Connecting-IP") ?? "local"}`,
+        ))
+      ) {
+        return new Response("too many requests", { status: 429 });
+      }
       const room = url.searchParams.get("room") || "default";
       const id = env.ROOM.idFromName(room);
       return env.ROOM.get(id).fetch(req);
     }
     if (url.pathname === "/api/discover") {
+      // polled every 5s by an open home page (12/min) — 30/min leaves headroom
+      if (
+        !(await allowRate(
+          env.RATE_LIMITER_DISCOVER,
+          `discover:${req.headers.get("CF-Connecting-IP") ?? "local"}`,
+        ))
+      ) {
+        return new Response("too many requests", { status: 429 });
+      }
       // the DO stub fetch drops the original client context, so the edge IP
       // travels in a private header — only /discover reads it
       const lobby = env.LOBBY.get(env.LOBBY.idFromName(LOBBY_NAME));

@@ -19,7 +19,12 @@ import {
 
 let restores: (() => void)[] = [];
 let state: MockDOState;
-let env: DOEnv & { ALLOWED_ORIGINS?: string };
+let env: DOEnv & {
+  ALLOWED_ORIGINS?: string;
+  RATE_LIMITER_WS?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+  RATE_LIMITER_DISCOVER?: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+  deny?: boolean;
+};
 let roomFetches: number[];
 
 beforeEach(() => {
@@ -45,7 +50,7 @@ afterEach(() => {
 });
 
 function upgrade(origin?: string, extra?: { key: string; value: string }[]): Request {
-  const headers = new Headers({ Upgrade: "websocket" });
+  const headers = new Headers({ Upgrade: "websocket", "CF-Connecting-IP": "203.0.113.10" });
   if (origin) headers.set("Origin", origin);
   for (const { key, value } of extra ?? []) headers.set(key, value);
   return new Request("https://maishare.test/ws?room=gate&peer=peer-gatetest01", {
@@ -147,6 +152,70 @@ describe("SDP candidate filter at the relay (NV-06 / ticket 13)", () => {
   it("keeps internal candidates for the internal dev-marker peers (fix-safety)", async () => {
     const { data } = await relayedData("local", "local");
     expect(data.sdp).toContain("127.0.0.1");
+  });
+});
+
+describe("rate limiting on floodable endpoints", () => {
+  let calls: { key: string; requests?: number; period?: number }[];
+  beforeEach(() => {
+    calls = [];
+    const limiter = {
+      limit: async (opts: { key: string }) => {
+        calls.push(opts);
+        return { success: env.deny !== true };
+      },
+    };
+    env.RATE_LIMITER_WS = limiter;
+    env.RATE_LIMITER_DISCOVER = limiter;
+  });
+
+  it("checks /ws upgrades per client IP", async () => {
+    const res = await worker.fetch(upgrade("https://maishare.test"), env as unknown as never);
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ key: "ws:203.0.113.10" }]);
+  });
+
+  it("returns 429 for /ws when the limiter denies", async () => {
+    env.deny = true;
+    const res = await worker.fetch(upgrade("https://maishare.test"), env as unknown as never);
+    expect(res.status).toBe(429);
+    expect(roomFetches).toHaveLength(0);
+  });
+
+  it("returns 429 for /api/discover when the limiter denies", async () => {
+    env.deny = true;
+    const res = await worker.fetch(
+      new Request("https://maishare.test/api/discover", {
+        headers: { "CF-Connecting-IP": "203.0.113.10" },
+      }),
+      env as unknown as never,
+    );
+    expect(res.status).toBe(429);
+    expect(calls[0].key).toBe("discover:203.0.113.10");
+  });
+
+  it("fails open when the binding is missing or throws", async () => {
+    delete env.RATE_LIMITER_WS;
+    delete env.RATE_LIMITER_DISCOVER;
+    env.RATE_LIMITER_WS = {
+      limit: async () => {
+        throw new Error("binding unavailable");
+      },
+    };
+    const res = await worker.fetch(upgrade("https://maishare.test"), env as unknown as never);
+    expect(res.status).toBe(200);
+    const res2 = await worker.fetch(upgrade("https://maishare.test"), env as unknown as never);
+    expect(res2.status).toBe(200); // fail open on a throwing binding
+  });
+
+  it("joinRequest default IP is used as the rate key", async () => {
+    await worker.fetch(
+      new Request("https://maishare.test/api/discover", {
+        headers: { "CF-Connecting-IP": "203.0.113.10" },
+      }),
+      env as unknown as never,
+    );
+    expect(calls[0].key).toBe("discover:203.0.113.10");
   });
 });
 

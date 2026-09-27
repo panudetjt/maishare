@@ -16,6 +16,28 @@ base.workers_dev = true; // serve on <name>.<account>.workers.dev
 // NV-03 needs invocation logs: they record more than dev request lines (check
 // whether the request URL's query string — the room key — is captured)
 base.observability = { enabled: true };
+// belt-and-braces: guarantee the rate-limiter bindings reach staging even if
+// the plugin drops them from the generated config (checked 2026-09-27: it did)
+if (!JSON.stringify(base).includes("RATE_LIMITER_WS")) {
+  base.unsafe = {
+    ...base.unsafe,
+    bindings: [
+      ...(base.unsafe?.bindings ?? []),
+      {
+        name: "RATE_LIMITER_WS",
+        type: "ratelimit",
+        namespace_id: "1001",
+        simple: { limit: 30, period: 60 },
+      },
+      {
+        name: "RATE_LIMITER_DISCOVER",
+        type: "ratelimit",
+        namespace_id: "1002",
+        simple: { limit: 30, period: 60 },
+      },
+    ],
+  };
+}
 // keep every other field (main, assets, DOs, migrations) identical
 writeFileSync("dist/maishare/wrangler.staging.json", JSON.stringify(base));
 

@@ -11,6 +11,18 @@ worker `maishare-nv-staging` (its own DO namespace/storage — production
 `node scripts/nv/cleanup-staging.mjs` deletes the staging worker together with
 every test room / Lobby entry / DO storage row it created (run before launch).
 
+Follow-up hardening shipped the same day, after the owner's dashboard readouts:
+**per-IP request-rate limits** on the two floodable endpoints via the managed
+Workers Rate Limiting API binding — WS upgrades 30/min/IP and discovery polls
+30/min/IP (`RATE_LIMITER_WS` / `RATE_LIMITER_DISCOVER`, wrangler.jsonc
+`unsafe.bindings`; fail-open if the binding is unavailable). Verified live on
+staging: a 50-join flood starts receiving 429 past the 30th join and a rapid
+discover flood ends in 429, while normal client cadence (12 discovers/min) is
+untouched. Remaining accepted residuals: non-browser clients can still fake
+Origin headers (edge WAF rate rules on a custom domain are the next layer, and
+workers.dev cannot host WAF rules), and Lobby CPU at ~225k-pair scale still
+wants the owner's dashboard watch (NV-02).
+
 ## NV-01 — zip-slip (gallery/attachment zip entry names)
 
 - [x] Check done: the app's exact archive path reproduced (fflate `zipSync`,

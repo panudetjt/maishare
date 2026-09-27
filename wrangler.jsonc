@@ -26,6 +26,28 @@
       { "name": "LOBBY", "class_name": "Lobby" },
     ],
   },
+  // managed per-key rate limiter (Workers Rate Limiting API) — gates the two
+  // floodable endpoints by client IP: WS upgrades and discovery polls get
+  // separate budgets. Limits are declared here ("simple" form) — the API only
+  // supports config-declared windows, not per-call ones. unsafe.bindings form:
+  // the vite plugin's dist-config generator does not carry the newer
+  // top-level "ratelimits" key through to deploys.
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "RATE_LIMITER_WS",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": { "limit": 30, "period": 60 },
+      },
+      {
+        "name": "RATE_LIMITER_DISCOVER",
+        "type": "ratelimit",
+        "namespace_id": "1002",
+        "simple": { "limit": 30, "period": 60 },
+      },
+    ],
+  },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Room"] },
     { "tag": "v2", "new_sqlite_classes": ["Lobby"] },
