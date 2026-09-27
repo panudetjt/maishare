@@ -20,6 +20,13 @@ const STALE_MS = 80_000;
 /** rooms refresh their lobby entry on every roster change and this often */
 const HEARTBEAT_MS = 30_000;
 
+/** SEC-05: member sockets per room — each join's roster-broadcast fan-out is
+ * O(room), so the DO refuses joins beyond this before accepting the socket */
+const MAX_ROOM_MEMBERS = 16;
+/** SEC-05: member sockets per client address — one host cannot open many
+ * signaling sockets and drive allocations in every member's tab */
+const MAX_MEMBERS_PER_ADDRESS = 8;
+
 /** 1-day supply-chain policy: only versions older than the window resolve */
 interface PeerMeta {
   peerId: string;
@@ -87,12 +94,12 @@ export class Room {
     // Keep idle hibernating sockets alive through load-balancer pings.
     // Optional: pings then simply wake the DO instead. Runtimes disagree on
     // the method name (autoResponse vs autoResponsePair) — support both.
-    const pair = new WebSocketRequestResponsePair("ping", "pong");
     const api = state as unknown as {
       setWebSocketAutoResponse?: (p: WebSocketRequestResponsePair) => void;
       setWebSocketAutoResponsePair?: (p: WebSocketRequestResponsePair) => void;
     };
     try {
+      const pair = new WebSocketRequestResponsePair("ping", "pong");
       (api.setWebSocketAutoResponse ?? api.setWebSocketAutoResponsePair)?.call(api, pair);
     } catch {
       /* not supported here */
@@ -172,8 +179,21 @@ export class Room {
       await this.state.storage.put("roomId", roomId);
     }
 
-    const ip = req.headers.get("CF-Connecting-IP") || "local";
+    const fwdIp = req.headers.get("CF-Connecting-IP");
+    const ip = fwdIp == null ? "local" : fwdIp;
     const probe = url.searchParams.get("probe") === "1";
+
+    // SEC-05: refuse joins beyond the room-size and per-address caps BEFORE
+    // accepting any socket, so roster broadcasts stay within the caps. Probe
+    // joins are exempt (bounded separately by the client probe cap).
+    const members = this.realRoster();
+    if (!probe && members.length >= MAX_ROOM_MEMBERS) {
+      return new Response("room is full", { status: 429 });
+    }
+    if (!probe && members.filter((e) => e.meta.ip === ip).length >= MAX_MEMBERS_PER_ADDRESS) {
+      return new Response("too many connections from this address", { status: 429 });
+    }
+
     const pair = new WebSocketPair();
     this.state.acceptWebSocket(pair[1]);
     pair[1].serializeAttachment({ peerId, name, ip, probe } satisfies PeerMeta);

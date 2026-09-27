@@ -44,6 +44,15 @@ export const INCOMING_START_COOLDOWN_MS = 1000;
  * failed by the watchdog riding the per-peer ping interval (SEC-04) */
 export const INCOMING_STALE_MS = 30_000;
 
+/** roster-driven mesh fan-out cap (SEC-05): peer contexts beyond this stay
+ * inert — no RTCPeerConnection, no data channel, no offers */
+export const MAX_PEERS = 12;
+/** a peer still 'connecting' with no remote description this long is a phantom
+ * join: its context is evicted instead of holding heavyweight allocations */
+export const CONNECT_TIMEOUT_MS = 10_000;
+/** cadence of the client-side phantom-peer sweep */
+const SWEEP_EVERY = 5_000;
+
 export type PeerStatus = "connecting" | "open" | "closed" | "failed";
 
 /** one blocking consent decision per unproven peer (keyed rooms only) */
@@ -175,6 +184,8 @@ interface PeerCtx {
   withheldFiles: { view: TransferView; file: File }[];
   /** after a bounced file-start, further starts wait out the cooldown */
   startBlockedUntil: number;
+  /** when the peer context was allocated — drives the phantom-join sweep */
+  createdAt: number;
   /** one unreadable-frame warning per connection — no toast storms */
   undecryptableWarned: boolean;
 }
@@ -263,6 +274,7 @@ export class RoomClient {
   private disposed = false;
   private toastSeq = 1;
   private emitTimer: ReturnType<typeof setTimeout> | null = null;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly listeners = new Set<() => void>();
   private state: RoomState;
 
@@ -311,6 +323,10 @@ export class RoomClient {
     await this.cipherReady;
     if (this.disposed) return;
     this.sig.connect();
+    // SEC-05: periodic sweep evicts phantom peer contexts that never connect
+    if (!this.sweepTimer) {
+      this.sweepTimer = setInterval(() => this.sweepPeers(), SWEEP_EVERY);
+    }
     this.emitNow();
   }
 
@@ -577,6 +593,7 @@ export class RoomClient {
     this.sniffJobs.clear();
     for (const t of this.transfers) if (t.blobUrl) URL.revokeObjectURL(t.blobUrl);
     if (this.emitTimer) clearTimeout(this.emitTimer);
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.listeners.clear();
   }
 
@@ -601,13 +618,15 @@ export class RoomClient {
     switch (m.t) {
       case "welcome":
         this.addresses = m.addresses;
+        // SEC-05: roster entries beyond the cap stay inert — no allocation
         for (const p of m.peers) this.ensurePeer(p.peerId, p.name);
         this.schedule();
         break;
-      case "peer-join":
-        this.ensurePeer(m.peerId, m.name);
-        this.toast(`${m.name} joined`, "success");
+      case "peer-join": {
+        // a join beyond the cap is ignored entirely (no toast, no connection)
+        if (this.ensurePeer(m.peerId, m.name)) this.toast(`${m.name} joined`, "success");
         break;
+      }
       case "peer-leave": {
         const p = this.peers.get(m.peerId);
         if (p) {
@@ -666,7 +685,9 @@ export class RoomClient {
 
   // ---- perfect negotiation mesh ----
 
-  private ensurePeer(peerId: string, name?: string): PeerCtx {
+  /** returns null when the mesh fan-out cap is reached — the roster entry
+   * stays inert: no connection, no data channel, no offers (SEC-05) */
+  private ensurePeer(peerId: string, name?: string): PeerCtx | null {
     if (peerId === this.selfId) throw new Error("self as peer");
     const existing = this.peers.get(peerId);
     if (existing) {
@@ -676,6 +697,7 @@ export class RoomClient {
       }
       return existing;
     }
+    if (this.peers.size >= MAX_PEERS) return null;
     const polite = this.initiatorOverride != null ? !this.initiatorOverride : this.selfId < peerId;
     const pc = new RTCPeerConnection({ iceServers: this.iceServers, iceCandidatePoolSize: 2 });
     const ctx: PeerCtx = {
@@ -705,6 +727,7 @@ export class RoomClient {
       withheldChats: [],
       withheldFiles: [],
       startBlockedUntil: 0,
+      createdAt: Date.now(),
       undecryptableWarned: false,
     };
     pc.onicecandidate = ({ candidate }) => {
@@ -733,7 +756,11 @@ export class RoomClient {
           } catch {}
           this.schedule();
         } else {
-          ctx.status = "failed";
+          // SEC-05: a failed connection releases its context instead of
+          // persisting forever
+          this.teardownPeer(ctx);
+          this.peers.delete(ctx.peerId);
+          this.consents = this.consents.filter((q) => q.peerId !== ctx.peerId);
           this.schedule();
         }
       }
@@ -749,12 +776,13 @@ export class RoomClient {
   }
 
   private async onSignal(peerId: string, data: unknown) {
-    let ctx: PeerCtx;
+    let ctx: PeerCtx | null;
     try {
       ctx = this.ensurePeer(peerId);
     } catch {
       return;
     }
+    if (!ctx) return; // inert roster entry beyond the fan-out cap
     const desc = data as { type?: RTCSdpType; sdp?: string };
     try {
       if (desc && desc.sdp !== undefined) {
@@ -858,6 +886,27 @@ export class RoomClient {
   /** may payload frames (chat, file-start, chunks) be delivered to this peer? */
   private deliverable(ctx: PeerCtx): boolean {
     return !this.cipher || ctx.proven || ctx.consented;
+  }
+
+  /** SEC-05: evict phantom peer contexts — still 'connecting' past
+   * CONNECT_TIMEOUT_MS with no remote description ever arrived — and release
+   * their heavyweight allocations instead of holding them indefinitely */
+  private sweepPeers() {
+    const now = Date.now();
+    let changed = false;
+    for (const [peerId, ctx] of Array.from(this.peers)) {
+      if (
+        ctx.status === "connecting" &&
+        !ctx.pc.remoteDescription &&
+        now - ctx.createdAt > CONNECT_TIMEOUT_MS
+      ) {
+        this.teardownPeer(ctx);
+        this.peers.delete(peerId);
+        this.consents = this.consents.filter((q) => q.peerId !== peerId);
+        changed = true;
+      }
+    }
+    if (changed) this.schedule();
   }
 
   /** prove room-key possession: seal a nonce into a ping — only a key holder
