@@ -8,6 +8,37 @@
 const PREFIX_COMPRESSED = "ms1z.";
 const PREFIX_RAW = "ms1.";
 
+// SEC-09 caps: a crafted ~100 KB paste must not be able to allocate hundreds
+// of megabytes before validation rejects it. Real QR-bounded codes stay under
+// ~3 KB of input and real gathered SDPs are a few KB, so these leave generous
+// headroom (spec numbers: ≤ ~16 KB input, ≤ ~512 KB inflated).
+export const MAX_INPUT_CHARS = 16 * 1024;
+export const MAX_INFLATED_BYTES = 512 * 1024;
+export const MAX_SDP_CHARS = 128 * 1024;
+
+/** sentinel distinguishing a cap abort from other stream failures */
+class InflateCapError extends Error {}
+
+/**
+ * Stream the inflation through a size-counting reader that aborts as soon as
+ * the byte ceiling is exceeded — the expansion is never fully materialized.
+ */
+async function inflateCapped(bytes: Uint8Array): Promise<Uint8Array> {
+  let total = 0;
+  const counting = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, ctrl) {
+      total += chunk.byteLength;
+      if (total > MAX_INFLATED_BYTES) throw new InflateCapError("inflation exceeds cap");
+      ctrl.enqueue(chunk);
+    },
+  });
+  const stream = new Blob([bytes as BlobPart])
+    .stream()
+    .pipeThrough(new DecompressionStream("deflate-raw"))
+    .pipeThrough(counting);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
 export interface ShareCode {
   type: "offer" | "answer";
   sdp: string;
@@ -35,13 +66,6 @@ async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-async function inflate(bytes: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([bytes as BlobPart])
-    .stream()
-    .pipeThrough(new DecompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
 export async function packShareCode(code: ShareCode): Promise<string> {
   const json = JSON.stringify({ v: 1, ...code });
   if (typeof CompressionStream === "undefined") {
@@ -52,10 +76,17 @@ export async function packShareCode(code: ShareCode): Promise<string> {
 
 export async function unpackShareCode(raw: string): Promise<ShareCode> {
   const s = raw.trim();
+  // stage 1: input cap — rejected before any decode, inflate, or parse
+  if (s.length > MAX_INPUT_CHARS) throw new Error("share code is too long");
   let bytes: Uint8Array;
-  if (s.startsWith(PREFIX_COMPRESSED))
-    bytes = await inflate(fromBase64Url(s.slice(PREFIX_COMPRESSED.length)));
-  else if (s.startsWith(PREFIX_RAW)) bytes = fromBase64Url(s.slice(PREFIX_RAW.length));
+  if (s.startsWith(PREFIX_COMPRESSED)) {
+    try {
+      bytes = await inflateCapped(fromBase64Url(s.slice(PREFIX_COMPRESSED.length)));
+    } catch (err) {
+      if (err instanceof InflateCapError) throw new Error("share code is too large");
+      throw err;
+    }
+  } else if (s.startsWith(PREFIX_RAW)) bytes = fromBase64Url(s.slice(PREFIX_RAW.length));
   else throw new Error("not a maishare share code");
   let parsed: unknown;
   try {
@@ -68,11 +99,13 @@ export async function unpackShareCode(raw: string): Promise<ShareCode> {
     obj?.v !== 1 ||
     (obj.type !== "offer" && obj.type !== "answer") ||
     typeof obj.sdp !== "string" ||
-    !obj.sdp.includes("v=0") ||
     typeof obj.name !== "string" ||
     obj.name.length > 32
   ) {
     throw new Error("invalid share code");
   }
+  // stage 3: the accepted SDP is capped after parse (distinct error)
+  if (obj.sdp.length > MAX_SDP_CHARS) throw new Error("share code SDP is too large");
+  if (!obj.sdp.includes("v=0")) throw new Error("invalid share code");
   return { type: obj.type, sdp: obj.sdp, name: obj.name };
 }
