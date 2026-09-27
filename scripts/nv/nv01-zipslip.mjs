@@ -22,6 +22,17 @@ const good = strToU8(PAYLOAD);
 entries["innocent.txt"] = good;
 const zip = zipSync(entries, { level: 0 });
 
+// `node scripts/nv/nv01-zipslip.mjs <path>` just writes the probe zip there —
+// for testing extractors this machine doesn't have (Windows Explorer, macOS
+// Archive Utility, 7-Zip...). Copy it over, extract with the target tool in an
+// empty folder, and check the folder's PARENT for nv01-escape.txt / nv01-deep.txt.
+const saveTo = process.argv[2];
+if (saveTo) {
+  (await import("node:fs")).writeFileSync(saveTo, zip);
+  console.log(`probe zip written to ${saveTo} — entries: ${EVIL_NAMES.join(", ")} + innocent.txt`);
+  process.exit(0);
+}
+
 const dir = mkdtempSync(join(tmpdir(), "nv01-"));
 const zipPath = join(dir, "probe.zip");
 (await import("node:fs")).writeFileSync(zipPath, zip);

@@ -13,6 +13,9 @@ const STAGING_NAME = "maishare-nv-staging";
 const base = JSON.parse(readFileSync("dist/maishare/wrangler.json", "utf8"));
 base.name = STAGING_NAME;
 base.workers_dev = true; // serve on <name>.<account>.workers.dev
+// NV-03 needs invocation logs: they record more than dev request lines (check
+// whether the request URL's query string — the room key — is captured)
+base.observability = { enabled: true };
 // keep every other field (main, assets, DOs, migrations) identical
 writeFileSync("dist/maishare/wrangler.staging.json", JSON.stringify(base));
 
