@@ -29,8 +29,11 @@ export type Control =
   | { t: "file-start"; id: string; name: string; size: number; mime: string; g: string }
   | { t: "file-end"; id: string }
   | { t: "file-cancel"; id: string; reason?: string }
-  | { t: "ping"; at: number }
-  | { t: "pong"; at: number }
+  // key-proof exchange (SEC-01): the challenger seals a ping carrying a nonce
+  // `n`; only a key holder can answer with a sealed pong echoing it. Ordinary
+  // heartbeat ping/pong frames carry no nonce and stay unsealed.
+  | { t: "ping"; at: number; n?: string }
+  | { t: "pong"; at: number; n?: string }
   | { t: "bye" }
   /** receiver -> sender: a frame arrived that could not be read. Always sent
    * as a PLAIN control frame so the sender can parse it regardless of keys. */

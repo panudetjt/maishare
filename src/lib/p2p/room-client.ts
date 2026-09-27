@@ -18,6 +18,12 @@ export const MAX_PENDING_CANDIDATES = 32;
 
 export type PeerStatus = "connecting" | "open" | "closed" | "failed";
 
+/** one blocking consent decision per unproven peer (keyed rooms only) */
+export interface ConsentRequest {
+  peerId: string;
+  name: string;
+}
+
 export interface PeerView {
   peerId: string;
   name: string;
@@ -83,6 +89,8 @@ export interface RoomState {
   chats: ChatMsg[];
   transfers: TransferView[];
   toasts: Toast[];
+  /** unproven peers awaiting the sender's explicit plaintext-consent decision */
+  consents: ConsentRequest[];
   sentTotal: number;
   recvTotal: number;
 }
@@ -101,6 +109,8 @@ interface Incoming {
   startedAt: number;
   lastEmitAt: number;
   lastEmitBytes: number;
+  /** monotonic timestamp of the last accepted chunk — drives the stale sweep */
+  lastProgress: number;
 }
 
 interface PeerCtx {
@@ -122,9 +132,19 @@ interface PeerCtx {
   maxChunk: number;
   incoming: Incoming | null;
   retriedIce: boolean;
-  /** peer can open our sealed frames (crypto.subtle needs a secure context) —
-   * false until its first hello proves otherwise */
+  /** peer claims WebCrypto capability (crypto.subtle) — proof is still pending */
   e2e: boolean;
+  /** peer proved room-key possession by echoing our sealed nonce pong */
+  proven: boolean;
+  /** user explicitly consented to plaintext delivery to this peer */
+  consented: boolean;
+  /** user refused consent — never prompt again for this connection */
+  consentDenied: boolean;
+  /** outstanding key-proof nonce we sealed into a challenge ping */
+  proofNonce: string | null;
+  /** payload frames held back until the peer proves or is consented */
+  withheldChats: Control[];
+  withheldFiles: { view: TransferView; file: File }[];
   /** one unreadable-frame warning per connection — no toast storms */
   undecryptableWarned: boolean;
 }
@@ -132,6 +152,17 @@ interface PeerCtx {
 function rid(): string {
   return uuid();
 }
+
+/** hello.e2e declares WebCrypto capability only — crypto.subtle needs a
+ * secure context (iOS Safari on plain LAN http has none). Room-key
+ * possession is proven separately by the sealed nonce exchange, never by
+ * this self-asserted flag. */
+function hasCrypto(): boolean {
+  return typeof crypto !== "undefined" && crypto.subtle != null;
+}
+
+/** how a control frame chooses its sealed form in sendControl */
+type SealMode = "auto" | "plain" | "proof";
 
 /** leading bytes across received chunks, bounded for sniffing */
 function headBytes(chunks: Uint8Array[], max: number): Uint8Array {
@@ -192,6 +223,7 @@ export class RoomClient {
   private chats: ChatMsg[] = [];
   private transfers: TransferView[] = [];
   private toasts: Toast[] = [];
+  private consents: ConsentRequest[] = [];
   private sentTotal = 0;
   private recvTotal = 0;
   private addresses: string[] = [];
@@ -281,6 +313,7 @@ export class RoomClient {
       chats: this.chats,
       transfers: this.transfers.map((t) => ({ ...t })),
       toasts: this.toasts,
+      consents: this.consents,
       sentTotal: this.sentTotal,
       recvTotal: this.recvTotal,
     };
@@ -306,7 +339,7 @@ export class RoomClient {
     if (!n || n === this.selfName) return;
     this.selfName = n;
     this.sig.updateName(n);
-    this.broadcastControl({ t: "hello", name: n, platform: platformLabel(), e2e: !!this.cipher });
+    this.broadcastControl({ t: "hello", name: n, platform: platformLabel(), e2e: hasCrypto() });
     this.schedule();
   }
 
@@ -314,11 +347,11 @@ export class RoomClient {
     const t = text.trim();
     if (!t) return;
     const openPeers = [...this.peers.values()].filter((p) => p.dc?.readyState === "open");
-    // truth at send time: sealed only when WE have a cipher and every connected
-    // peer can unseal; with nobody connected we don't know yet (undefined,
-    // shown neutrally)
+    // truth at send time: sealed only when WE have a key and every connected
+    // peer has proven key possession; with nobody connected we don't know yet
+    // (undefined, shown neutrally)
     const sealed =
-      openPeers.length === 0 ? undefined : this.cipher !== null && openPeers.every((p) => p.e2e);
+      openPeers.length === 0 ? undefined : this.cipher !== null && openPeers.every((p) => p.proven);
     const msg: ChatMsg = {
       id: rid(),
       peerId: this.selfId,
@@ -333,7 +366,12 @@ export class RoomClient {
     this.schedule();
     const frame: Control = { t: "chat", id: msg.id, text: t, at: msg.at, g: groupId };
     if (openPeers.length) {
-      this.broadcastControl(frame);
+      // keyed rooms withhold payloads from peers that neither proved key
+      // possession nor drew an explicit consent — never downgrade to plaintext
+      for (const ctx of openPeers) {
+        if (this.deliverable(ctx)) void this.sendControl(ctx, frame);
+        else ctx.withheldChats.push(frame);
+      }
     } else {
       this.pendingChats.push(frame);
     }
@@ -358,7 +396,7 @@ export class RoomClient {
     if (!list.length) return;
     const openPeers = [...this.peers.values()].filter((p) => p.dc?.readyState === "open");
     const sealed =
-      openPeers.length === 0 ? undefined : this.cipher !== null && openPeers.every((p) => p.e2e);
+      openPeers.length === 0 ? undefined : this.cipher !== null && openPeers.every((p) => p.proven);
     for (const file of list) {
       const isImage = (file.type || "").startsWith("image/");
       const view: TransferView = {
@@ -385,7 +423,10 @@ export class RoomClient {
       // already show the right preview and icon
       void this.sniffTransfer(view, file);
       if (openPeers.length) {
-        for (const ctx of openPeers) this.enqueue(ctx, view, file);
+        for (const ctx of openPeers) {
+          if (this.deliverable(ctx)) this.enqueue(ctx, view, file);
+          else ctx.withheldFiles.push({ view, file });
+        }
       } else {
         this.deferred.push({ view, file });
       }
@@ -454,6 +495,23 @@ export class RoomClient {
     this.schedule();
   }
 
+  /** the user's answer to a consent prompt: allow releases the peer's
+   * withheld payloads as plaintext, deny keeps withholding (both final) */
+  respondConsent(peerId: string, allow: boolean) {
+    if (!this.consents.some((q) => q.peerId === peerId)) return;
+    this.consents = this.consents.filter((q) => q.peerId !== peerId);
+    const ctx = this.peers.get(peerId);
+    if (ctx) {
+      if (allow) {
+        ctx.consented = true;
+        this.flushForPeer(ctx);
+      } else {
+        ctx.consentDenied = true;
+      }
+    }
+    this.schedule();
+  }
+
   toast(msg: string, kind: Toast["kind"] = "info") {
     const t: Toast = { id: this.toastSeq++, msg, kind };
     this.toasts = [...this.toasts, t];
@@ -486,6 +544,8 @@ export class RoomClient {
         // fresh websocket session: rebuild the mesh from the new welcome
         for (const p of this.peers.values()) this.teardownPeer(p);
         this.peers.clear();
+        // prompts for old connections are stale — fresh peers re-request
+        this.consents = [];
       }
       this.hadSession = true;
     }
@@ -509,6 +569,7 @@ export class RoomClient {
           this.toast(`${p.name} left`, "info");
           this.teardownPeer(p);
           this.peers.delete(m.peerId);
+          this.consents = this.consents.filter((q) => q.peerId !== m.peerId);
           this.schedule();
         }
         break;
@@ -592,6 +653,12 @@ export class RoomClient {
       incoming: null,
       retriedIce: false,
       e2e: false,
+      proven: false,
+      consented: false,
+      consentDenied: false,
+      proofNonce: null,
+      withheldChats: [],
+      withheldFiles: [],
       undecryptableWarned: false,
     };
     pc.onicecandidate = ({ candidate }) => {
@@ -702,12 +769,11 @@ export class RoomClient {
         t: "hello",
         name: this.selfName,
         platform: platformLabel(),
-        e2e: !!this.cipher,
+        e2e: hasCrypto(),
       });
-      if (!this.cipher) {
-        this.flushDeferred(ctx);
-        void this.pump(ctx);
-      }
+      // keyed rooms release deferred traffic only to deliverable peers; with
+      // no key everyone is deliverable
+      this.flushForPeer(ctx);
       this.schedule();
     };
     dc.onclose = () => {
@@ -727,17 +793,63 @@ export class RoomClient {
     }, PING_EVERY);
   }
 
-  private flushDeferred(ctx: PeerCtx) {
+  /** may payload frames (chat, file-start, chunks) be delivered to this peer? */
+  private deliverable(ctx: PeerCtx): boolean {
+    return !this.cipher || ctx.proven || ctx.consented;
+  }
+
+  /** prove room-key possession: seal a nonce into a ping — only a key holder
+   * can return the sealed pong echoing it (SEC-01) */
+  private challenge(ctx: PeerCtx) {
+    if (!this.cipher || ctx.proofNonce != null) return;
+    const nonce = rid();
+    ctx.proofNonce = nonce;
+    void (async () => {
+      const dc = ctx.dc;
+      if (!dc || dc.readyState !== "open" || !this.cipher) return;
+      try {
+        const frame = await this.cipher.seal(
+          FRAME.CONTROL_ENC,
+          encoder.encode(JSON.stringify({ t: "ping", at: Date.now(), n: nonce })),
+        );
+        if (dc.readyState === "open") dc.send(frame);
+      } catch {}
+    })();
+  }
+
+  /** one blocking consent prompt per unproven, capability-less peer — the
+   * documented escape hatch for WebCrypto-incapable (iOS/plain-http) peers */
+  private requestConsent(ctx: PeerCtx) {
+    if (ctx.consented || ctx.consentDenied) return;
+    if (this.consents.some((q) => q.peerId === ctx.peerId)) return;
+    this.consents = [...this.consents, { peerId: ctx.peerId, name: ctx.name }];
+    this.schedule();
+  }
+
+  private flushForPeer(ctx: PeerCtx) {
+    if (!this.deliverable(ctx)) return;
     // text first so a caption precedes its file-starts on the wire
     if (this.pendingChats.length) {
       const chats = this.pendingChats;
       this.pendingChats = [];
       for (const c of chats) void this.sendControl(ctx, c);
     }
-    if (!this.deferred.length) return;
-    const items = this.deferred;
-    this.deferred = [];
-    for (const d of items) this.enqueue(ctx, d.view, d.file);
+    if (ctx.withheldChats.length) {
+      const chats = ctx.withheldChats;
+      ctx.withheldChats = [];
+      for (const c of chats) void this.sendControl(ctx, c);
+    }
+    if (this.deferred.length) {
+      const items = this.deferred;
+      this.deferred = [];
+      for (const d of items) this.enqueue(ctx, d.view, d.file);
+    }
+    if (ctx.withheldFiles.length) {
+      const items = ctx.withheldFiles;
+      ctx.withheldFiles = [];
+      for (const d of items) this.enqueue(ctx, d.view, d.file);
+    }
+    void this.pump(ctx);
   }
 
   private enqueue(ctx: PeerCtx, view: TransferView, file: File) {
@@ -754,13 +866,23 @@ export class RoomClient {
 
   // ---- frame io ----
 
-  private async sendControl(ctx: PeerCtx, c: Control) {
+  private static PAYLOAD_CONTROLS = new Set<string>(["chat", "file-start"]);
+
+  /**
+   * Send a control frame. `auto` seals only payload frames (chat, file-start)
+   * and only for peers that proved key possession — protocol frames stay
+   * unsealed so connectivity survives. `plain` never seals (back-channels);
+   * `proof` always seals (the pong echoing a challenge nonce).
+   */
+  private async sendControl(ctx: PeerCtx, c: Control, mode: SealMode = "auto") {
     const dc = ctx.dc;
     if (!dc || dc.readyState !== "open") return;
     const json = encoder.encode(JSON.stringify(c));
-    // seal only for peers whose hello proved they can unseal
+    const wantSeal =
+      mode === "proof" ||
+      (mode === "auto" && RoomClient.PAYLOAD_CONTROLS.has(c.t) && this.cipher && ctx.proven);
     const frame =
-      this.cipher && ctx.e2e
+      wantSeal && this.cipher
         ? await this.cipher.seal(FRAME.CONTROL_ENC, json)
         : concatFrame(FRAME.CONTROL, json);
     if (dc.readyState === "open") {
@@ -861,12 +983,19 @@ export class RoomClient {
         ctx.name = c.name || ctx.name;
         ctx.platform = c.platform;
         ctx.e2e = c.e2e === true;
-        // now we know whether they can open sealed frames — release anything
-        // that was waiting for exactly this (flushing twice is a no-op)
-        if (this.cipher ? ctx.e2e : true) {
-          this.flushDeferred(ctx);
-          void this.pump(ctx);
+        if (this.cipher) {
+          if (ctx.e2e) {
+            // claims capability — prove it: only a key holder echoes the
+            // sealed nonce pong. Until then payloads stay withheld.
+            if (!ctx.proven) this.challenge(ctx);
+          } else {
+            // cannot ever prove (no crypto.subtle) — the consent gate decides
+            this.requestConsent(ctx);
+          }
         }
+        // release anything that was waiting for exactly this (flushing twice
+        // is a no-op; gated to proven/consented peers in keyed rooms)
+        this.flushForPeer(ctx);
         this.schedule();
         break;
       case "chat":
@@ -915,6 +1044,7 @@ export class RoomClient {
           startedAt: performance.now(),
           lastEmitAt: performance.now(),
           lastEmitBytes: 0,
+          lastProgress: performance.now(),
         };
         this.transfers = [view, ...this.transfers];
         this.schedule();
@@ -932,13 +1062,31 @@ export class RoomClient {
         }
         break;
       }
-      case "ping":
-        void this.sendControl(ctx, { t: "pong", at: c.at });
+      case "ping": {
+        const at = typeof c.at === "number" && Number.isFinite(c.at) ? c.at : Date.now();
+        // a proof-bearing ping must be answered with a SEALED pong echoing the
+        // nonce — only a key holder can produce it
+        if (typeof c.n === "string" && c.n) {
+          void this.sendControl(ctx, { t: "pong", at, n: c.n }, "proof");
+        } else {
+          void this.sendControl(ctx, { t: "pong", at });
+        }
         break;
-      case "pong":
-        ctx.rtt = Math.max(0, Date.now() - c.at);
-        this.schedule();
+      }
+      case "pong": {
+        if (typeof c.at === "number" && Number.isFinite(c.at)) {
+          ctx.rtt = Math.max(0, Date.now() - c.at);
+          this.schedule();
+        }
+        // key-proof completion: the sealed pong echoes the nonce we sealed
+        if (sealed && typeof c.n === "string" && ctx.proofNonce != null && c.n === ctx.proofNonce) {
+          ctx.proofNonce = null;
+          ctx.proven = true;
+          this.flushForPeer(ctx);
+          this.schedule();
+        }
         break;
+      }
       case "bye":
         this.onServerMsg({ t: "peer-leave", peerId: ctx.peerId });
         break;
@@ -1019,7 +1167,9 @@ export class RoomClient {
     // mime (not the browser's extension guess) is what goes on the wire
     await this.sniffTransfer(view, file);
     view.status = "active";
-    const seal = this.cipher !== null && ctx.e2e;
+    // chunks are sealed only for peers that proved key possession (consented
+    // peers take plaintext — the user's explicit downgrade)
+    const seal = this.cipher !== null && ctx.proven;
     const chunkSize = Math.max(4096, ctx.maxChunk - (seal ? ENC_OVERHEAD : 1));
     await this.sendControl(ctx, {
       t: "file-start",

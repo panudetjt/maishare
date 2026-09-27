@@ -7,13 +7,14 @@ import {
 } from "@tanstack/react-router";
 import { z } from "zod";
 import { useRoom } from "../lib/p2p/use-room";
+import type { ConsentRequest } from "../lib/p2p/room-client";
 import { loadName, saveName, uuid } from "../lib/device";
 import { addRecent } from "../lib/recents";
 import { Conversation, type PendingFile } from "../components/Conversation";
 import { PeerList } from "../components/PeerList";
 import { QrInvite } from "../components/QrInvite";
 import { Toasts } from "../components/Toasts";
-import { ArrowLeft, CopyIcon, LockIcon, Logo, QrIcon } from "../components/Icons";
+import { ArrowLeft, CopyIcon, LockIcon, LockOpenIcon, Logo, QrIcon } from "../components/Icons";
 
 export const roomSearchSchema = z.object({
   k: z.string().min(4).max(200).optional().catch(undefined),
@@ -188,6 +189,13 @@ function RoomRoute() {
         </div>
       )}
 
+      {client && state.consents[0] && (
+        <ConsentGate
+          req={state.consents[0]}
+          onAnswer={(allow) => client.respondConsent(state.consents[0]!.peerId, allow)}
+        />
+      )}
+
       <Toasts toasts={state.toasts} />
     </div>
   );
@@ -195,6 +203,51 @@ function RoomRoute() {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Blocking consent gate (SEC-01): shown once per peer that cannot prove room
+ * key possession (no crypto.subtle). Nothing flows to that peer as plaintext
+ * until the user explicitly downgrades — refusing keeps their payloads hidden.
+ */
+function ConsentGate({
+  req,
+  onAnswer,
+}: {
+  req: ConsentRequest;
+  onAnswer: (allow: boolean) => void;
+}) {
+  return (
+    <div className="consent-overlay">
+      <div
+        className="consent-panel panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="consent-title"
+      >
+        <span className="consent-icon" aria-hidden="true">
+          <LockOpenIcon size={22} />
+        </span>
+        <h2 id="consent-title">{req.name} couldn’t prove the room key</h2>
+        <p>
+          This device says it can’t do end-to-end encryption (no WebCrypto — typical for iOS over
+          plain http). Sending to them unencrypted means anyone on the wire could read it.
+        </p>
+        <div className="consent-actions">
+          <button className="btn" onClick={() => onAnswer(false)}>
+            Keep hidden
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={() => onAnswer(true)}
+            aria-label="Send without end-to-end encryption"
+          >
+            Send without end-to-end encryption
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function RoomPending() {

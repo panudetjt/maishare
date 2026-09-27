@@ -12,6 +12,7 @@ const EMPTY: RoomState = {
   chats: [],
   transfers: [],
   toasts: [],
+  consents: [],
   sentTotal: 0,
   recvTotal: 0,
 };

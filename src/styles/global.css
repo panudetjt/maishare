@@ -1551,3 +1551,53 @@ input::placeholder {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------- consent gate (SEC-01) ---------- */
+
+.consent-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(11, 13, 18, 0.86);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 70;
+  padding: 16px;
+}
+.consent-panel {
+  max-width: 440px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 22px;
+  border-color: var(--warn, #e0a83c);
+}
+.consent-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(224, 168, 60, 0.14);
+  color: var(--warn, #e0a83c);
+}
+.consent-panel h2 {
+  font-size: 17px;
+  margin: 0;
+}
+.consent-panel p {
+  margin: 0;
+  color: var(--dim);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.consent-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}

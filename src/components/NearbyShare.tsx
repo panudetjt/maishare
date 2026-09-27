@@ -26,6 +26,7 @@ const IDLE: RoomState = {
   chats: [],
   transfers: [],
   toasts: [],
+  consents: [],
   sentTotal: 0,
   recvTotal: 0,
 };

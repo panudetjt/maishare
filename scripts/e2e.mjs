@@ -354,9 +354,47 @@ try {
     JSON.stringify(Object.keys(bubbleZipped).sort()) === JSON.stringify(["pic-a.png", "pic-b.png"]),
   );
 
+  // ---- SEC-01: a secure-context joiner WITHOUT the key receives nothing ----
+  // they claim crypto capability, so no consent prompt may appear — the room
+  // key is the only way in, and the header lock still reflects key presence
+  const eveCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const eveUrl = new URL(invite);
+  eveUrl.searchParams.delete("k");
+  eveUrl.searchParams.set("name", "eve");
+  const evePage = await eveCtx.newPage();
+  await evePage.goto(eveUrl.href, { waitUntil: "domcontentloaded" });
+  await alice.page.getByText("2 peers", { exact: true }).waitFor({ timeout: 20_000 });
+  ok(
+    "no consent prompt for a crypto-capable joiner",
+    (await alice.page.locator(".consent-overlay").count()) === 0,
+  );
+  ok(
+    "keyed room header shows the lock",
+    (await alice.page.locator(".room-code svg").count()) === 1,
+  );
+  ok("keyless joiner header has no lock", (await evePage.locator(".room-code svg").count()) === 0);
+  await alice.page.getByRole("textbox", { name: "Message" }).fill("eve must not see this");
+  await alice.page.getByRole("button", { name: "Send", exact: true }).click();
+  await bob.page.getByText("eve must not see this").waitFor({ timeout: 10_000 });
+  ok("proven peer still receives sealed chat", true);
+  await evePage
+    .getByText("eve must not see this")
+    .waitFor({ timeout: 3000 })
+    .then(
+      () => ok("secure keyless joiner receives nothing", false),
+      () => ok("secure keyless joiner receives nothing", true),
+    );
+  await eveCtx.close();
+  await alice.page.waitForFunction(
+    () => document.querySelectorAll(".peer-list li.peer").length === 2,
+    undefined,
+    { timeout: 15_000 },
+  );
+
   // ---- a peer without crypto.subtle (iOS Safari on plain http LAN) ----
-  // the host's room is sealed with AES-GCM; before the capability handshake
-  // this peer silently dropped every sealed frame — it must now receive them
+  // the host's room is sealed with AES-GCM; this peer cannot prove key
+  // possession at all, so the blocking consent gate decides its fate — the
+  // documented fallback stays usable, but only with an explicit downgrade
   const iosCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   await iosCtx.addInitScript(() => {
     try {
@@ -375,6 +413,13 @@ try {
   const hasSubtle = await iosPage.evaluate(() => window.crypto.subtle !== undefined);
   ok("insecure peer really lacks crypto.subtle", !hasSubtle);
   await alice.page.getByText("2 peers", { exact: true }).waitFor({ timeout: 20_000 });
+
+  // the blocking consent gate is the only way content reaches this peer
+  await alice.page
+    .getByRole("button", { name: /send without end-to-end encryption/i })
+    .waitFor({ timeout: 15_000 });
+  ok("blocking consent prompt appears for the incapable peer", true);
+  await alice.page.getByRole("button", { name: /send without end-to-end encryption/i }).click();
 
   await alice.page.getByRole("textbox", { name: "Message" }).fill("hello ios");
   await alice.page.getByRole("button", { name: "Send", exact: true }).click();
