@@ -226,7 +226,10 @@ function LanRooms() {
       ) : (
         <ul className="lan-list">
           {rooms.map((r) => {
-            const shown = r.names.slice(0, 3).join(", ");
+            // id-only rooms (non-provable IP match) carry no roster content —
+            // they still render and go through the host-only probe on join
+            const shown = (r.names ?? []).slice(0, 3).join(", ");
+            const people = r.people ?? 0;
             return (
               <li key={r.roomId}>
                 <Link
@@ -238,8 +241,8 @@ function LanRooms() {
                   <code>{r.roomId}</code>
                   <span className="lan-meta muted small">
                     <UsersIcon size={13} />
-                    {r.people} online{shown ? ` · ${shown}` : ""}
-                    {r.people > 3 ? "…" : ""}
+                    {people} online{shown ? ` · ${shown}` : ""}
+                    {people > 3 ? "…" : ""}
                   </span>
                 </Link>
               </li>

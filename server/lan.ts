@@ -98,3 +98,38 @@ export function sameLan(a: string, b: string): boolean {
   if (!ga || !gb) return false;
   return ga.slice(0, 4).join(":") === gb.slice(0, 4).join(":");
 }
+
+/**
+ * SEC-07: does this pair's relation PROVE a shared network topology?
+ * Topology-provable relations — private IPv4 in one /24, v4-mapped equality
+ * over private ranges, one IPv6 /64, and the loopback dev marker — do. A bare
+ * public-IPv4 exact match proves nothing (two homes behind one CGNAT share
+ * the same address), so it is a discovery *candidate* but never proves enough
+ * to disclose roster content.
+ */
+export function provableLan(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  a = a.trim().toLowerCase();
+  b = b.trim().toLowerCase();
+  // the headerless dev fallback marker is only ever produced internally
+  if (a === "local" && b === "local") return true;
+  const a4 = v4ToInt(a);
+  const b4 = v4ToInt(b);
+  if (a4 != null && b4 != null) {
+    return isPrivateV4(a4) && isPrivateV4(b4) && a4 >>> 8 === b4 >>> 8;
+  }
+  if (a4 != null || b4 != null) {
+    // mixed families: unwrap the v4-mapped side, then apply the private rule
+    const g = v6Groups(a4 != null ? b : a);
+    const n = a4 ?? b4;
+    if (!g || n == null) return false;
+    const mapped = g.slice(0, 5).every((v) => v === 0) && g[5] === 0xffff;
+    if (!mapped) return false;
+    const v = (g[6] << 16) | g[7];
+    return isPrivateV4(v) && isPrivateV4(n) && v >>> 8 === n >>> 8;
+  }
+  const ga = v6Groups(a);
+  const gb = v6Groups(b);
+  if (!ga || !gb) return false;
+  return ga.slice(0, 4).join(":") === gb.slice(0, 4).join(":");
+}

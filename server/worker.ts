@@ -5,7 +5,7 @@
 // (IP -> connection count + display names), and /api/discover lists only the
 // rooms reachable from the caller's own network. Raw IPs never leave the DOs.
 
-import { sameLan } from "./lan";
+import { provableLan, sameLan } from "./lan";
 import { rewriteShareHtml } from "./share-html";
 
 const RE_ROOM = /^[\w-]{2,64}$/;
@@ -303,7 +303,14 @@ export class Lobby {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/discover") {
       const ip = req.headers.get("x-client-ip") ?? "";
-      return Response.json({ rooms: this.forIp(ip) });
+      // SEC-07: non-provable matches return the room id only — member names,
+      // counts and creation time are withheld (roster content remains
+      // available to actual joiners via the welcome message after signaling)
+      return Response.json({
+        rooms: this.forIp(ip).map(({ provable, ...room }) =>
+          provable ? room : { roomId: room.roomId },
+        ),
+      });
     }
     if (req.method === "POST" && url.pathname === "/announce") {
       const body = (await req.json().catch(() => null)) as Announce | null;
@@ -336,10 +343,24 @@ export class Lobby {
     return new Response("not found", { status: 404 });
   }
 
-  /** Rooms whose roster includes a peer from the caller's network. */
-  private forIp(ip: string): { roomId: string; people: number; names: string[]; since: number }[] {
+  /**
+   * Rooms whose roster includes a peer from the caller's network, with a flag
+   * saying whether the IP relation PROVES a shared network (SEC-07). A match
+   * is a candidate; only a provable relation may carry roster content —
+   * the room id itself always accompanies a match so the client's host-only
+   * probe can verify it for real.
+   */
+  private forIp(
+    ip: string,
+  ): { roomId: string; people: number; names: string[]; since: number; provable: boolean }[] {
     const now = Date.now();
-    const out: { roomId: string; people: number; names: string[]; since: number }[] = [];
+    const out: {
+      roomId: string;
+      people: number;
+      names: string[];
+      since: number;
+      provable: boolean;
+    }[] = [];
     for (const [roomId, entry] of this.rooms) {
       if (now - entry.updatedAt > STALE_MS) {
         this.rooms.delete(roomId);
@@ -347,15 +368,18 @@ export class Lobby {
       }
       if (!ip) continue;
       let match = false;
+      let provable = false;
       for (const peer of Object.keys(entry.ips)) {
-        if (sameLan(ip, peer)) {
+        if (!provable && provableLan(ip, peer)) {
+          provable = true;
           match = true;
           break;
         }
+        if (!match && sameLan(ip, peer)) match = true;
       }
       if (!match) continue;
       const people = Object.values(entry.ips).reduce((a, b) => a + b, 0);
-      out.push({ roomId, people, names: entry.names, since: entry.since });
+      out.push({ roomId, people, names: entry.names, since: entry.since, provable });
     }
     out.sort((a, b) => b.since - a.since);
     return out;
