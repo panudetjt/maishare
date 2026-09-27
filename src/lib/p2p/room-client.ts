@@ -16,6 +16,14 @@ const PING_EVERY = 4000;
  * before the remote description lands, so past this the flood is dropped. */
 export const MAX_PENDING_CANDIDATES = 32;
 
+/** hard ceiling on an announced inbound transfer size (SEC-02) — comfortably
+ * above anything a LAN handoff carries, far below what a 1-byte claim could
+ * otherwise trick the receiver into buffering */
+export const MAX_TRANSFER_SIZE = 2 ** 31; // 2 GiB
+/** file-start string claims are clamped before any state is built from them */
+export const MAX_NAME_CHARS = 256;
+export const MAX_MIME_CHARS = 128;
+
 export type PeerStatus = "connecting" | "open" | "closed" | "failed";
 
 /** one blocking consent decision per unproven peer (keyed rooms only) */
@@ -1023,14 +1031,32 @@ export class RoomClient {
         );
         break;
       case "file-start": {
+        // SEC-02: validate the claim before any state is built from it — the
+        // announced header bounds what the receiver accepts. Bad claims never
+        // start a transfer and draw explicit file-cancel backpressure.
+        const size = c.size;
+        const id = typeof c.id === "string" ? c.id : "";
+        const invalid =
+          typeof size !== "number" ||
+          !Number.isSafeInteger(size) ||
+          size < 0 ||
+          size > MAX_TRANSFER_SIZE ||
+          typeof c.name !== "string" ||
+          typeof c.mime !== "string";
+        if (invalid) {
+          void this.sendControl(ctx, { t: "file-cancel", id, reason: "invalid-header" });
+          this.schedule();
+          break;
+        }
         const view: TransferView = {
-          id: c.id,
+          id,
           dir: "in",
           peerId: ctx.peerId,
           peerName: ctx.name,
-          name: c.name,
-          size: c.size,
-          mime: c.mime,
+          // clamped in length: over-long strings never reach the UI or buffers
+          name: c.name.slice(0, MAX_NAME_CHARS),
+          size,
+          mime: c.mime.slice(0, MAX_MIME_CHARS),
           status: "active",
           bytes: 0,
           speed: 0,
@@ -1101,6 +1127,17 @@ export class RoomClient {
       this.notifyUndecryptable(ctx, "orphan");
       return;
     }
+    // SEC-02: the first byte past the announced size is a protocol violation —
+    // abort instead of buffering what the sender never declared
+    if (inc.view.bytes + body.byteLength > inc.view.size) {
+      ctx.incoming = null;
+      inc.view.status = "error";
+      this.toast(`"${inc.view.name}" sent more data than announced — transfer aborted`, "error");
+      void this.sendControl(ctx, { t: "file-cancel", id: inc.view.id, reason: "size-mismatch" });
+      this.schedule();
+      return;
+    }
+    inc.lastProgress = performance.now();
     inc.chunks.push(body);
     inc.view.bytes += body.byteLength;
     this.recvTotal += body.byteLength;
@@ -1122,8 +1159,8 @@ export class RoomClient {
     const chunks = inc.chunks;
     v.status = "done";
     const secs = (performance.now() - inc.startedAt) / 1000;
-    v.speed = secs > 0 ? v.size / secs : 0;
-    v.bytes = v.size;
+    v.speed = secs > 0 ? v.bytes / secs : 0;
+    // the counter keeps bytes actually received — never rewritten to the claim
     // blob assembly waits for the content sniff so the Blob, the preview URL
     // and the timeline render from verified bytes, not the sender's claim
     void this.verifyIncoming(v, chunks);
