@@ -41,7 +41,7 @@ try {
 }
 
 // 3) sanity: the app's own (same-origin) client still works end-to-end
-const own = await join(STAGING_BASE, { room: ownRoom, peer: `nvown-${tag}`, name: "own-app" });
+await join(STAGING_BASE, { room: ownRoom, peer: `nvown-${tag}`, name: "own-app" });
 console.log("same-origin join still works (welcome received)");
 
 const rooms = await discover(STAGING_BASE);

@@ -915,9 +915,8 @@ export class RoomClient {
    * CONNECT_TIMEOUT_MS with no remote description ever arrived — and release
    * their heavyweight allocations instead of holding them indefinitely */
   private sweepPeers() {
-    const now = Date.now();
     let changed = false;
-    for (const [peerId, ctx] of Array.from(this.peers)) {
+    for (const [, ctx] of Array.from(this.peers)) {
       if (
         ctx.status === "connecting" &&
         !ctx.pc.remoteDescription &&
