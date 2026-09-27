@@ -1,7 +1,15 @@
 export type SignalStatus = "connecting" | "online" | "offline";
 
 export type ServerMsg =
-  | { t: "welcome"; you: string; peers: { peerId: string; name: string }[]; addresses: string[] }
+  | {
+      t: "welcome";
+      you: string;
+      /** SEC-08 peer-id ownership token — remember it, re-present it on every
+       * retry/reconnect so a dropped socket can reclaim its slot */
+      token?: string;
+      peers: { peerId: string; name: string }[];
+      addresses: string[];
+    }
   | { t: "peer-join"; peerId: string; name: string }
   | { t: "peer-leave"; peerId: string }
   | { t: "peer-name"; peerId: string; name: string }
@@ -28,6 +36,10 @@ export interface RoomTransport {
   send(m: ClientMsg): void;
   updateName(name: string): void;
   close(): void;
+  /** SEC-08: remember the peer-id ownership token delivered in the welcome and
+   * re-present it on every retry/reconnect (transports without a server token
+   * flow ignore this) */
+  setToken?(token: string): void;
 }
 
 function wsUrl(): string {
@@ -40,7 +52,7 @@ export class Signaling implements RoomTransport {
   private closedByUs = false;
   private attempts = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private info: { roomId: string; peerId: string; name: string; probe?: boolean };
+  private info: { roomId: string; peerId: string; name: string; probe?: boolean; token?: string };
   private handlers: { onMessage: (m: ServerMsg) => void; onStatus: (s: SignalStatus) => void } = {
     onMessage: () => {},
     onStatus: () => {},
@@ -52,6 +64,12 @@ export class Signaling implements RoomTransport {
 
   bind(handlers: { onMessage: (m: ServerMsg) => void; onStatus: (s: SignalStatus) => void }) {
     this.handlers = handlers;
+  }
+
+  /** the welcome's ownership token — travels in every future handshake */
+  setToken(token: string) {
+    if (this.info.token === token) return;
+    this.info = { ...this.info, token };
   }
 
   connect() {
@@ -71,6 +89,7 @@ export class Signaling implements RoomTransport {
         name: this.info.name,
       });
       if (this.info.probe) params.set("probe", "1");
+      if (this.info.token) params.set("token", this.info.token);
       ws = new WebSocket(`${wsUrl()}?${params}`);
     } catch {
       this.retry();

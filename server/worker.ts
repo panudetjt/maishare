@@ -26,6 +26,9 @@ const MAX_ROOM_MEMBERS = 16;
 /** SEC-05: member sockets per client address — one host cannot open many
  * signaling sockets and drive allocations in every member's tab */
 const MAX_MEMBERS_PER_ADDRESS = 8;
+/** SEC-08: peer-id ownership tokens are wiped this long after the last
+ * member leaves (the room drained) */
+const TOKEN_GRACE_MS = 60_000;
 
 /** 1-day supply-chain policy: only versions older than the window resolve */
 interface PeerMeta {
@@ -35,6 +38,8 @@ interface PeerMeta {
   ip: string;
   /** discovery probers ride the room's relay but are invisible to the room */
   probe?: boolean;
+  /** SEC-08: ownership token minted at this peer's first admission */
+  token?: string;
 }
 
 /** shape of messages peers send over the signaling channel */
@@ -194,9 +199,28 @@ export class Room {
       return new Response("too many connections from this address", { status: 429 });
     }
 
+    // SEC-08: a peer id is owned by whoever first claimed it. The ownership
+    // token is minted at first admission, persisted in DO storage (it survives
+    // hibernation/restart) and handed to the client in the welcome — a later
+    // join presenting the same peer id evicts the incumbent only with the
+    // matching token; without it the join is refused and the incumbent stays.
+    // Probe joins never touch the token flow (existing early-return below).
+    let token: string | undefined;
+    if (!probe) {
+      const stored = await this.state.storage.get<string>(`token:${peerId}`);
+      if (stored == null) {
+        token = crypto.randomUUID();
+        await this.state.storage.put(`token:${peerId}`, token);
+      } else if (url.searchParams.get("token")?.slice(0, 128) !== stored) {
+        return new Response("peer id in use", { status: 409 });
+      } else {
+        token = stored;
+      }
+    }
+
     const pair = new WebSocketPair();
     this.state.acceptWebSocket(pair[1]);
-    pair[1].serializeAttachment({ peerId, name, ip, probe } satisfies PeerMeta);
+    pair[1].serializeAttachment({ peerId, name, ip, probe, token } satisfies PeerMeta);
 
     if (probe) {
       // discovery verification: a room member opens a host-only WebRTC
@@ -221,6 +245,7 @@ export class Room {
     this.send(pair[1], {
       t: "welcome",
       you: peerId,
+      token,
       peers: this.realRoster()
         .map((e) => e.meta)
         .filter((m) => m.peerId !== peerId)
@@ -275,6 +300,12 @@ export class Room {
     if (!meta?.peerId || meta.probe) return;
     this.broadcast({ t: "peer-leave", peerId: meta.peerId }, meta.peerId);
     await this.announceLobby();
+    // room drained: forget ownership tokens once the grace period passes
+    if (!this.realRoster().length) {
+      const next = Date.now() + TOKEN_GRACE_MS;
+      const current = await this.state.storage.getAlarm();
+      if (current == null || current > next) await this.state.storage.setAlarm(next);
+    }
   }
 
   async webSocketError(_ws: WebSocket): Promise<void> {
@@ -284,6 +315,13 @@ export class Room {
   async alarm(): Promise<void> {
     if (!this.roomId) this.roomId = (await this.state.storage.get("roomId")) ?? "";
     if (!this.roomId) return;
+    if (!this.realRoster().length) {
+      // the room drained TOKEN_GRACE_MS ago — wipe peer-id ownership tokens so
+      // a fresh claim works afterwards
+      const tokens = await this.state.storage.list({ prefix: "token:" });
+      for (const key of tokens.keys()) await this.state.storage.delete(key);
+      return;
+    }
     await this.announceLobby();
     // one-shot alarm: only re-arm while the room is still alive; the close
     // handler announces the empty roster which removes the lobby entry

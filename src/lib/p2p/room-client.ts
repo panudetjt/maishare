@@ -618,6 +618,9 @@ export class RoomClient {
     switch (m.t) {
       case "welcome":
         this.addresses = m.addresses;
+        // SEC-08: remember the ownership token and re-present it on every
+        // retry/reconnect, so a dropped socket reclaims its own slot
+        if (m.token) this.sig.setToken?.(m.token);
         // SEC-05: roster entries beyond the cap stay inert — no allocation
         for (const p of m.peers) this.ensurePeer(p.peerId, p.name);
         this.schedule();
