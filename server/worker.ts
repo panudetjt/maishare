@@ -9,6 +9,26 @@ import { isValidIp, provableLan, sameLan } from "./lan";
 import { sanitizeSdpCandidates } from "./sdp";
 import { rewriteShareHtml } from "./share-html";
 
+/**
+ * Security headers on HTML navigations (audit hardening). CSP cuts the blast
+ * radius of any future XSS to same-origin resources; frame-ancestors +
+ * X-Frame-Options block clickjacking embeds; referrer-policy keeps query
+ * strings (the invite key) out of cross-origin referrers. The app needs no
+ * inline scripts and no third-party origins, so the policy is tight — inline
+ * STYLES stay allowed (React/PhotoSwipe inject style attributes).
+ */
+const HTML_SECURITY_HEADERS: Record<string, string> = {
+  "content-security-policy":
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; media-src 'self' blob:; " +
+    "connect-src 'self' blob: ws: wss:; " +
+    "worker-src 'self'; manifest-src 'self'; font-src 'self'; object-src 'none'; " +
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "x-frame-options": "DENY",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "x-content-type-options": "nosniff",
+};
+
 const RE_ROOM = /^[\w-]{2,64}$/;
 const RE_PEER = /^[\w-]{8,64}$/;
 /** invite navigations (shareable links) — handled by the worker for per-room
@@ -555,10 +575,12 @@ export default {
       return new Response(rewriteShareHtml(await res.text(), url.origin, room), {
         status: res.status,
         headers: {
+          ...HTML_SECURITY_HEADERS,
           "content-type": "text/html; charset=utf-8",
-          // rewritten per room — short TTL so previews refresh, and caching
-          // can never serve one room's markup under another room's URL
-          "cache-control": res.headers.get("cache-control") ?? "public, max-age=300",
+          // revalidate every time: the shell changes on each deploy (security
+          // headers, og rewrite) and per-room markup must never be served
+          // stale — hashed assets stay immutable-cached, only HTML revalidates
+          "cache-control": "public, no-cache",
         },
       });
     }

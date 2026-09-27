@@ -219,6 +219,39 @@ describe("rate limiting on floodable endpoints", () => {
   });
 });
 
+describe("security headers on HTML navigations", () => {
+  beforeEach(() => {
+    env.ASSETS = {
+      fetch: async (req: Request) =>
+        new Response("<!doctype html><html><title>shell</title></html>", {
+          headers: { "content-type": "text/html" },
+        }),
+    } as unknown as DOEnv["ASSETS"];
+  });
+
+  it("adds CSP, frame and referrer headers to HTML responses", async () => {
+    const res = await worker.fetch(new Request("https://maishare.test/"), env as unknown as never);
+    expect(res.headers.get("content-security-policy")).toContain("script-src 'self'");
+    expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("leaves non-HTML assets untouched by the header policy", async () => {
+    env.ASSETS = {
+      fetch: async () =>
+        new Response("console.log(1)", { headers: { "content-type": "application/javascript" } }),
+    } as unknown as DOEnv["ASSETS"];
+    const res = await worker.fetch(
+      new Request("https://maishare.test/assets/x.js"),
+      env as unknown as never,
+    );
+    expect(res.headers.get("content-security-policy")).toBeNull();
+    expect(await res.text()).toBe("console.log(1)");
+  });
+});
+
 describe("drain cleanup reclaims all storage (NV-04)", () => {
   it("a drained room's storage is emptied by the grace alarm", async () => {
     restores.push(installWebSocketPair(), installResponse101());

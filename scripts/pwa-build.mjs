@@ -93,8 +93,22 @@ self.addEventListener("fetch", (e) => {
   // signaling and discovery are live-only: never served from cache
   if (url.pathname === "/ws" || url.pathname.startsWith("/api/")) return;
   if (req.mode === "navigate") {
-    // "/" holds the precached app shell for every route (SPA fallback)
-    e.respondWith(staleWhileRevalidate("/", req).catch(() => fetch(req)));
+    // never key a cache entry by the navigation URL: routes carry secrets in
+    // their query strings (?k=) and every room's shell differs (the worker
+    // rewrites its og tags) — so go network-first for a fresh per-route shell,
+    // refresh the shared "/" shell in passing for offline boots, and fall back
+    // to that shell when offline
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (!res || !res.ok) return res || Response.error();
+          return caches.open(VERSION).then((c) => {
+            c.put("/", res.clone());
+            return res;
+          });
+        })
+        .catch(() => caches.match("/").then((r) => r || fetch(req))),
+    );
     return;
   }
   e.respondWith(staleWhileRevalidate(url.pathname, req));
