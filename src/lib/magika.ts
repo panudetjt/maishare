@@ -1,7 +1,8 @@
 // Content-type sniffing with Magika (vendored WASM build of katgpt-magika-wasm,
-// a Rust port of Google's deep-learning detector). maishare otherwise trusts
-// the browser's extension-derived file.type, which is empty or wrong for
-// extension-less drops and for anything a peer mislabels.
+// an independent pure-Rust no_std rewrite of Magika — not Google's official
+// ONNX implementation; see vendor/katgpt-magika-wasm/PROVENANCE.md). maishare
+// otherwise trusts the browser's extension-derived file.type, which is empty
+// or wrong for extension-less drops and for anything a peer mislabels.
 //
 // The 3.1 MB wasm loads lazily on the first sniff and stays a separate chunk —
 // never part of the initial bundle. Every helper degrades to null/no-op so a
