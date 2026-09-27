@@ -166,6 +166,9 @@ export interface HarnessPeer {
 }
 
 let objectUrlSeq = 0;
+/** object URLs the client handed out / revoked — cleared on every install */
+export const createdObjectUrls: string[] = [];
+export const revokedObjectUrls: string[] = [];
 
 /** install the browser globals the client needs; returns a restore function */
 export function installRoomClientStubs(): () => void {
@@ -177,15 +180,17 @@ export function installRoomClientStubs(): () => void {
     createObjectURL?: (o: unknown) => string;
     revokeObjectURL?: (u: string) => void;
   };
-  const hadCreate = "createObjectURL" in URLCtor;
-  const hadRevoke = "revokeObjectURL" in URLCtor;
-  URLCtor.createObjectURL ??= () => `blob:harness-${++objectUrlSeq}`;
-  URLCtor.revokeObjectURL ??= () => {};
+  createdObjectUrls.length = 0;
+  revokedObjectUrls.length = 0;
+  URLCtor.createObjectURL = () => `blob:harness-${++objectUrlSeq}`;
+  URLCtor.revokeObjectURL = (u: string) => {
+    revokedObjectUrls.push(u);
+  };
   return () => {
     if (hadPC) globalWindow.RTCPeerConnection = prevPC;
     else delete globalWindow.RTCPeerConnection;
-    if (!hadCreate) delete URLCtor.createObjectURL;
-    if (!hadRevoke) delete URLCtor.revokeObjectURL;
+    delete URLCtor.createObjectURL;
+    delete URLCtor.revokeObjectURL;
   };
 }
 

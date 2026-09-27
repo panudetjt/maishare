@@ -10,7 +10,8 @@ const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 // event (threshold BUFFER_LOW) wakes the pump again.
 const BUFFER_HIGH = 8 * 1024 * 1024;
 const BUFFER_LOW = 2 * 1024 * 1024;
-const PING_EVERY = 4000;
+/** heartbeat interval; also drives the SEC-04 stale-transfer watchdog */
+export const PING_EVERY = 4000;
 /** A peer that never sends SDP could otherwise queue candidates forever (a
  * relayed flood costs it nothing); a real negotiation trickles only a handful
  * before the remote description lands, so past this the flood is dropped. */
@@ -30,6 +31,18 @@ export const MAX_CHAT_CHARS = 8000;
 /** retained chat messages (rolling cap, oldest dropped first) — keeps a peer
  * streaming maximal frames from growing memory and per-render cost unbounded */
 export const MAX_RETAINED_CHATS = 200;
+
+/** concurrent in-flight inbound transfers per peer (SEC-04). Chunks carry no
+ * transfer id, so the protocol is one-at-a-time by construction: a file-start
+ * arriving while one is in flight settles the previous as cancelled and is
+ * bounced with explicit file-cancel backpressure. */
+export const MAX_INCOMING_PER_PEER = 1;
+/** how long a bounced peer must wait before its next file-start is accepted —
+ * bounds the list a bare file-start flood can grow to (~1 entry/second) */
+export const INCOMING_START_COOLDOWN_MS = 1000;
+/** an inbound transfer with no chunk progress for this long has stalled and is
+ * failed by the watchdog riding the per-peer ping interval (SEC-04) */
+export const INCOMING_STALE_MS = 30_000;
 
 export type PeerStatus = "connecting" | "open" | "closed" | "failed";
 
@@ -160,6 +173,8 @@ interface PeerCtx {
   /** payload frames held back until the peer proves or is consented */
   withheldChats: Control[];
   withheldFiles: { view: TransferView; file: File }[];
+  /** after a bounced file-start, further starts wait out the cooldown */
+  startBlockedUntil: number;
   /** one unreadable-frame warning per connection — no toast storms */
   undecryptableWarned: boolean;
 }
@@ -497,7 +512,21 @@ export class RoomClient {
   }
 
   clearFinishedTransfers() {
-    const keep = this.transfers.filter((t) => t.status === "queued" || t.status === "active");
+    // SEC-04: stale inbound 'active' entries are retired too, so the Clear
+    // action always bounds the list; dropped entries release their URLs
+    const now = performance.now();
+    const stale = new Set<string>();
+    for (const p of this.peers.values()) {
+      const inc = p.incoming;
+      if (inc && now - inc.lastProgress > INCOMING_STALE_MS) {
+        stale.add(inc.view.id);
+        p.incoming = null;
+        void this.sendControl(p, { t: "file-cancel", id: inc.view.id, reason: "stale" });
+      }
+    }
+    const keep = this.transfers.filter(
+      (t) => (t.status === "queued" || t.status === "active") && !stale.has(t.id),
+    );
     for (const t of this.transfers) {
       if (t.blobUrl && !keep.includes(t)) URL.revokeObjectURL(t.blobUrl);
     }
@@ -675,6 +704,7 @@ export class RoomClient {
       proofNonce: null,
       withheldChats: [],
       withheldFiles: [],
+      startBlockedUntil: 0,
       undecryptableWarned: false,
     };
     pc.onicecandidate = ({ candidate }) => {
@@ -806,7 +836,23 @@ export class RoomClient {
     if (ctx.pingTimer) clearInterval(ctx.pingTimer);
     ctx.pingTimer = setInterval(() => {
       if (ctx.dc?.readyState === "open") void this.sendControl(ctx, { t: "ping", at: Date.now() });
+      // the per-peer ping interval doubles as the stale-transfer watchdog
+      this.sweepIncoming(ctx);
     }, PING_EVERY);
+  }
+
+  /** SEC-04 watchdog: an inbound transfer with no chunk progress for
+   * INCOMING_STALE_MS has stalled — fail it instead of leaving it 'active'
+   * forever, so even without user action nothing is immune to cleanup */
+  private sweepIncoming(ctx: PeerCtx) {
+    const inc = ctx.incoming;
+    if (!inc || performance.now() - inc.lastProgress <= INCOMING_STALE_MS) return;
+    ctx.incoming = null;
+    inc.view.status = "error";
+    this.toast(`"${inc.view.name}" stalled — no data for a while, transfer failed`, "error");
+    // the sender is still pumping into a dead transfer — tell it
+    void this.sendControl(ctx, { t: "file-cancel", id: inc.view.id, reason: "stalled" });
+    this.schedule();
   }
 
   /** may payload frames (chat, file-start, chunks) be delivered to this peer? */
@@ -1066,6 +1112,27 @@ export class RoomClient {
           typeof c.mime !== "string";
         if (invalid) {
           void this.sendControl(ctx, { t: "file-cancel", id, reason: "invalid-header" });
+          this.schedule();
+          break;
+        }
+        // SEC-04: chunks carry no transfer id, so one inbound transfer per
+        // peer at a time (MAX_INCOMING_PER_PEER). A header arriving while the
+        // slot is busy — or during a bounce cooldown — settles any previous
+        // transfer as cancelled (never orphaned 'active') and is refused with
+        // explicit backpressure instead of creating a list entry.
+        if (ctx.incoming || performance.now() < ctx.startBlockedUntil) {
+          if (ctx.incoming) {
+            const prev = ctx.incoming;
+            ctx.incoming = null;
+            prev.view.status = "cancelled";
+            void this.sendControl(ctx, {
+              t: "file-cancel",
+              id: prev.view.id,
+              reason: "superseded",
+            });
+          }
+          ctx.startBlockedUntil = performance.now() + INCOMING_START_COOLDOWN_MS;
+          void this.sendControl(ctx, { t: "file-cancel", id, reason: "busy" });
           this.schedule();
           break;
         }
