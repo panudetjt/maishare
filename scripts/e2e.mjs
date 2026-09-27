@@ -466,7 +466,10 @@ try {
   await alice.page.getByRole("button", { name: "Send", exact: true }).click();
   await bob.page.getByText("secret to real peers").waitFor({ timeout: 10_000 });
   ok("real peer still reads sealed rooms normally", true);
-  await mallory.getByText(/could not decrypt this message/i).waitFor({ timeout: 10_000 });
+  await mallory
+    .locator(".bubble-line", { hasText: /could not decrypt this message/i })
+    .first()
+    .waitFor({ timeout: 10_000 });
   ok("wrong-key joiner sees an unreadable-message warning (no silence)", true);
   await alice.page.getByText(/your message could not be decrypted/i).waitFor({ timeout: 10_000 });
   ok("sender is told the other side could not decrypt", true);

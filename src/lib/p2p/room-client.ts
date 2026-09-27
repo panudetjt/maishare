@@ -1013,9 +1013,10 @@ export class RoomClient {
   /** a frame arrived that we cannot read — tell the user on BOTH sides and
    * never stay silent (this is how the iOS receive bug hid for so long) */
   private notifyUndecryptable(ctx: PeerCtx, detail: "sealed" | "malformed" | "orphan") {
-    // sealed frames arrive one per message, but chunks flood — one warning
-    // per connection keeps the timeline readable
-    if (detail !== "sealed" && ctx.undecryptableWarned) return;
+    // sealed frames arrive one per message (the key-proof challenge re-seals
+    // on every hello), but chunks flood — one warning per connection keeps
+    // the timeline readable
+    if (ctx.undecryptableWarned) return;
     ctx.undecryptableWarned = true;
     const text =
       detail === "sealed"
