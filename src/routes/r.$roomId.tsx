@@ -38,6 +38,13 @@ export const Route = createFileRoute("/r/$roomId")({
   component: RoomRoute,
 });
 
+/** NV-03: the invite key rides the fragment (#k=…) — server-invisible */
+function readKeyFromHash(): string | undefined {
+  if (typeof location === "undefined") return undefined;
+  const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
+  return hash.get("k") ?? undefined;
+}
+
 function RoomRoute() {
   const { roomId } = Route.useParams();
   const search = Route.useSearch();
@@ -45,14 +52,19 @@ function RoomRoute() {
   const navigate = useNavigate({ from: Route.fullPath });
   const [profileName] = useState(() => loadName());
   const name = search.name ?? profileName;
-  const { client, state } = useRoom(roomId, search.k, name);
+  // NV-03: the key travels in the URL fragment (#k=…) — fragments never reach
+  // the server, so no logging layer can capture it. Legacy ?k= links are read
+  // as a fallback and migrated below.
+  const [fragmentKey] = useState(() => readKeyFromHash());
+  const key = fragmentKey ?? search.k;
+  const { client, state } = useRoom(roomId, key, name);
   const [showQr, setShowQr] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
   const [nameDraft, setNameDraft] = useState(name);
   const [copied, setCopied] = useState(false);
   const [pending, setPending] = useState<PendingFile[]>([]);
 
-  const inviteUrl = `${location.origin}/r/${roomId}${search.k ? `?k=${encodeURIComponent(search.k)}` : ""}`;
+  const inviteUrl = `${location.origin}/r/${roomId}${key ? `#k=${encodeURIComponent(key)}` : ""}`;
 
   const setSearch = (patch: Partial<RoomSearch>) => {
     void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
@@ -63,8 +75,23 @@ function RoomRoute() {
     setPending((prev) => [...prev, ...files.map((file) => ({ id: uuid(), file }))]);
 
   useEffect(() => {
-    addRecent({ roomId, k: search.k, at: Date.now() });
-  }, [roomId, search.k]);
+    addRecent({ roomId, k: key, at: Date.now() });
+  }, [roomId, key]);
+
+  // legacy ?k= links: scrub the query and move the key into the fragment, so
+  // the key stops appearing in any request line after landing
+  useEffect(() => {
+    if (!search.k) return;
+    navigate({
+      to: "/r/$roomId",
+      params: { roomId },
+      search: (prev) => ({ name: prev.name }),
+      hash: `k=${encodeURIComponent(fragmentKey ?? search.k!)}`,
+      replace: true,
+    });
+    // once on landing — the key is stable for the lifetime of the page
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function commitName(v: string) {
     const n = v.trim().slice(0, 32);
@@ -130,7 +157,7 @@ function RoomRoute() {
         </div>
         <span className="room-code" title={`room ${roomId}`}>
           {roomId}
-          {search.k ? <LockIcon size={12} /> : null}
+          {key ? <LockIcon size={12} /> : null}
         </span>
         <div className="header-actions">
           <button className="btn btn-sm" onClick={copyInvite}>

@@ -91,9 +91,12 @@ scripts/nv/nv02-lobby-load.mjs`. The audit's ~225k-pair linearity harness is
   for the retention window) and whether production keeps observability enabled
   at all. The only keys currently in staging logs are test values
   (`nvcannotkeepthiskey42`, probe cbs) — they die with the staging worker.
-- Countermeasure (warranted): fragment-key (`#k=`) design → written up as
-  ticket `issues/14-fragment-key.md`. Fragments never reach the server, so no
-  logging layer on any ingress can ever capture the key.
+- Countermeasure (warranted): fragment-key (`#k=`) design — **IMPLEMENTED**
+  (ticket `issues/14-fragment-key.md`, done). Invite keys now travel only in
+  the URL fragment on every path that produces them (room creation, copy
+  invite, QR, recents); legacy `?k=` links are consumed client-side and
+  migrated. Owner also decided production runs with Workers Observability
+  DISABLED, closing the layer entirely rather than relying on it alone.
 
 ## NV-04 — Room DO persistence
 

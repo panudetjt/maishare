@@ -13,9 +13,8 @@ const STAGING_NAME = "maishare-nv-staging";
 const base = JSON.parse(readFileSync("dist/maishare/wrangler.json", "utf8"));
 base.name = STAGING_NAME;
 base.workers_dev = true; // serve on <name>.<account>.workers.dev
-// NV-03 needs invocation logs: they record more than dev request lines (check
-// whether the request URL's query string — the room key — is captured)
-base.observability = { enabled: true };
+// observability stays OFF (owner decision 2026-09-27): invocation logs capture
+// full query strings, and before ticket 14 those carried the room key
 // belt-and-braces: guarantee the rate-limiter bindings reach staging even if
 // the plugin drops them from the generated config (checked 2026-09-27: it did)
 if (!JSON.stringify(base).includes("RATE_LIMITER_WS")) {

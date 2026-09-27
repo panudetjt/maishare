@@ -16,7 +16,7 @@ const ogHash = createHash("sha256")
 // canonical origin baked into the static home page's social tags (set
 // PUBLIC_ORIGIN when building behind a custom domain). Room invites don't
 // need this — the worker rewrites them per request origin at serve time.
-const PUBLIC_ORIGIN = (process.env.PUBLIC_ORIGIN ?? "https://maishare.panudetjt.workers.dev")
+const PUBLIC_ORIGIN = (process.env.PUBLIC_ORIGIN ?? "https://maishare.panudet.dev")
   .trim()
   .replace(/\/+$/, "");
 

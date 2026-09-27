@@ -39,10 +39,12 @@ function HomeComponent() {
   }
 
   function startRoom() {
+    // NV-03: the key rides the fragment (#k=…) — never transmitted to the server
     void navigate({
       to: "/r/$roomId",
       params: { roomId: makeRoomCode() },
-      search: { k: makeRoomKey(), name },
+      search: { name },
+      hash: `k=${encodeURIComponent(makeRoomKey())}`,
     });
   }
 
@@ -53,8 +55,11 @@ function HomeComponent() {
       try {
         const u = new URL(s);
         const m = u.pathname.match(/\/r\/([\w-]{2,64})/i);
-        if (m) return { roomId: m[1], k: u.searchParams.get("k") ?? undefined };
-        return null;
+        if (!m) return null;
+        // NV-03: new invites carry the key in the fragment; legacy ?k= links
+        // still parse and are migrated to fragments by the room route
+        const hashK = u.hash.startsWith("#k=") ? decodeURIComponent(u.hash.slice(3)) : undefined;
+        return { roomId: m[1], k: hashK ?? u.searchParams.get("k") ?? undefined };
       } catch {
         return null;
       }
@@ -73,7 +78,8 @@ function HomeComponent() {
     void navigate({
       to: "/r/$roomId",
       params: { roomId: parsed.roomId },
-      search: { ...(parsed.k ? { k: parsed.k } : {}), name },
+      search: { name },
+      ...(parsed.k ? { hash: `k=${encodeURIComponent(parsed.k)}` } : {}),
     });
   }
 
@@ -152,19 +158,30 @@ function HomeComponent() {
                 </button>
               </div>
               <ul className="recent-list">
-                {recents.map((r) => (
-                  <li key={r.roomId}>
-                    <Link
-                      to="/r/$roomId"
-                      params={{ roomId: r.roomId }}
-                      search={r.k ? { k: r.k } : {}}
-                      className="recent-chip"
-                    >
-                      <QrIcon size={14} />
-                      <code>{r.roomId}</code>
-                    </Link>
-                  </li>
-                ))}
+                {recents.map((r) => {
+                  const hash = r.k ? `#k=${encodeURIComponent(r.k)}` : "";
+                  return (
+                    <li key={r.roomId}>
+                      <a
+                        className="recent-chip"
+                        href={`/r/${r.roomId}${hash}`}
+                        onClick={(e) => {
+                          if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                          e.preventDefault();
+                          void navigate({
+                            to: "/r/$roomId",
+                            params: { roomId: r.roomId },
+                            search: {},
+                            ...(r.k ? { hash } : {}),
+                          });
+                        }}
+                      >
+                        <QrIcon size={14} />
+                        <code>{r.roomId}</code>
+                      </a>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ) : null}

@@ -76,7 +76,7 @@ try {
   await alice.page.waitForURL(/\/r\//, { timeout: 10_000 });
   const invite = alice.page.url();
   const roomId = new URL(invite).pathname.split("/").pop();
-  ok("room created with key", /\?k=/.test(invite), roomId);
+  ok("room created with key in fragment", /#k=/.test(invite) && !/\?k=/.test(invite), roomId);
 
   // room code is reflected in the header
   await alice.page.getByText(roomId).first().waitFor({ timeout: 5000 });
@@ -359,7 +359,7 @@ try {
   // key is the only way in, and the header lock still reflects key presence
   const eveCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const eveUrl = new URL(invite);
-  eveUrl.searchParams.delete("k");
+  eveUrl.hash = ""; // strip the fragment key: eve is the keyless joiner
   eveUrl.searchParams.set("name", "eve");
   const evePage = await eveCtx.newPage();
   await evePage.goto(eveUrl.href, { waitUntil: "domcontentloaded" });
@@ -456,6 +456,9 @@ try {
   // ---- wrong-key joiner: unreadable frames must notify BOTH sides ----
   const rogueCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const rogueUrl = new URL(invite);
+  // legacy ?k= form: exercises the room route's migration (consumed, moved to
+  // the fragment) with a WRONG key — mallory must end up with that wrong key
+  rogueUrl.hash = "";
   rogueUrl.searchParams.set("k", "zzzzzzzzzzzzzzzz");
   rogueUrl.searchParams.set("name", "mallory");
   const mallory = await rogueCtx.newPage();

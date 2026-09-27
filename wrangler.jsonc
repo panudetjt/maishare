@@ -8,6 +8,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "maishare",
+  // production custom domain — workers auto-creates the DNS record and edge
+  // certificate (requires the panudet.dev zone in this account)
+  "routes": [{ "pattern": "maishare.panudet.dev", "custom_domain": true }],
   "main": "server/worker.ts",
   "compatibility_date": "2026-09-01",
   "assets": {
