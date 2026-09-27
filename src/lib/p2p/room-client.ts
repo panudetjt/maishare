@@ -11,6 +11,10 @@ const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 const BUFFER_HIGH = 8 * 1024 * 1024;
 const BUFFER_LOW = 2 * 1024 * 1024;
 const PING_EVERY = 4000;
+/** A peer that never sends SDP could otherwise queue candidates forever (a
+ * relayed flood costs it nothing); a real negotiation trickles only a handful
+ * before the remote description lands, so past this the flood is dropped. */
+export const MAX_PENDING_CANDIDATES = 32;
 
 export type PeerStatus = "connecting" | "open" | "closed" | "failed";
 
@@ -663,7 +667,9 @@ export class RoomClient {
       } else {
         const cand = data as RTCIceCandidateInit;
         if (!ctx.pc.remoteDescription) {
-          ctx.pendingCandidates.push(cand);
+          if (ctx.pendingCandidates.length < MAX_PENDING_CANDIDATES) {
+            ctx.pendingCandidates.push(cand);
+          }
         } else {
           try {
             await ctx.pc.addIceCandidate(cand);
