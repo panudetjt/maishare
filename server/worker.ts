@@ -6,6 +6,7 @@
 // rooms reachable from the caller's own network. Raw IPs never leave the DOs.
 
 import { isValidIp, provableLan, sameLan } from "./lan";
+import { sanitizeSdpCandidates } from "./sdp";
 import { rewriteShareHtml } from "./share-html";
 
 const RE_ROOM = /^[\w-]{2,64}$/;
@@ -55,6 +56,10 @@ interface Env {
   LOBBY: DurableObjectNamespace;
   /** the SPA build output (wired by @cloudflare/vite-plugin) */
   ASSETS: Fetcher;
+  /** NV-05: extra WebSocket origins allowed past the same-origin gate
+   * (comma-separated; only needed when signaling lives behind a different
+   * host than the page — same-origin covers every default deployment) */
+  ALLOWED_ORIGINS?: string;
 }
 
 /** what a Room DO reports to the Lobby */
@@ -180,10 +185,10 @@ export class Room {
       return new Response("invalid room or peer id", { status: 400 });
     }
 
-    if (this.roomId !== roomId) {
-      this.roomId = roomId;
-      await this.state.storage.put("roomId", roomId);
-    }
+    this.roomId = roomId;
+    // unconditional: the drain-cleanup alarm wipes storage (NV-04), so every
+    // admission rebuilds the row rather than trusting stale state
+    await this.state.storage.put("roomId", roomId);
 
     // SEC-10: identity fails closed. An absent header is the internal
     // headerless dev fallback ("local"); a present-but-invalid value — an
@@ -281,7 +286,21 @@ export class Room {
 
     if (msg.t === "signal" && RE_PEER.test(msg.to)) {
       const target = this.roster().find((e) => e.meta.peerId === msg.to);
-      if (target) this.send(target.ws, { t: "signal", from: meta.peerId, data: msg.data });
+      if (target) {
+        // NV-06 (validated: a browser dialed an attacker-supplied internal
+        // candidate): internal-address candidates only flow between provably
+        // co-network peers; everyone else's SDP gets them stripped at relay
+        let data = msg.data;
+        if (
+          data &&
+          typeof data === "object" &&
+          typeof (data as { sdp?: unknown }).sdp === "string"
+        ) {
+          const { sdp, ...rest } = data as { sdp: string };
+          data = { ...rest, sdp: sanitizeSdpCandidates(sdp, meta.ip, target.meta.ip) };
+        }
+        this.send(target.ws, { t: "signal", from: meta.peerId, data });
+      }
     } else if (msg.t === "name") {
       meta.name = msg.name.slice(0, 48);
       ws.serializeAttachment(meta);
@@ -321,10 +340,13 @@ export class Room {
     if (!this.roomId) this.roomId = (await this.state.storage.get("roomId")) ?? "";
     if (!this.roomId) return;
     if (!this.realRoster().length) {
-      // the room drained TOKEN_GRACE_MS ago — wipe peer-id ownership tokens so
-      // a fresh claim works afterwards
-      const tokens = await this.state.storage.list({ prefix: "token:" });
-      for (const key of tokens.keys()) await this.state.storage.delete(key);
+      // the room drained TOKEN_GRACE_MS ago — reclaim the DO's storage
+      // entirely (roomId + ownership tokens). A flood of bare joins mints
+      // ~80 KB of permanent SQLite per room (NV-04: 27.61 MB measured on
+      // staging from ~350 test rooms); this bounds every abandoned room to a
+      // 60-second lifetime instead of forever. The in-memory roomId stays so
+      // a rejoin re-seeds storage; tokens re-mint per SEC-08.
+      await this.state.storage.deleteAll();
       return;
     }
     await this.announceLobby();
@@ -432,6 +454,27 @@ export class Lobby {
   }
 }
 
+/**
+ * NV-05 (validated: a foreign socket planted a discovery-visible room): only
+ * the app itself may hold a signaling socket. Browsers always send an Origin
+ * header on WS handshakes and the app dials its own host, so same-origin
+ * covers every deployment (workers.dev, custom domain, LAN, localhost dev);
+ * extra hosts ride ALLOWED_ORIGINS. Headerless/foreign-origin upgrades —
+ * every cross-origin page and non-browser flooder — are refused before the
+ * DO is reached. A hostile non-browser client can still fake the header;
+ * that residual is inherent to header-based gates and documented.
+ */
+function originAllowed(req: Request, url: URL, env: Env): boolean {
+  const origin = req.headers.get("Origin");
+  if (!origin) return false;
+  if (origin === url.origin) return true;
+  return (env.ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .includes(origin);
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -441,6 +484,9 @@ export default {
       });
     }
     if (url.pathname === "/ws") {
+      if (!originAllowed(req, url, env)) {
+        return new Response("origin not allowed", { status: 403 });
+      }
       const room = url.searchParams.get("room") || "default";
       const id = env.ROOM.idFromName(room);
       return env.ROOM.get(id).fetch(req);

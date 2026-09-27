@@ -5,8 +5,14 @@
 // Usage notes:
 // - Staging scripts take the deploy URL via NV_BASE_URL (default: the
 //   isolated staging worker deploy-staging.mjs creates).
+// - Sockets use the `ws` package so an Origin header can be set (Node's
+//   native WebSocket forbids it) — /ws is same-origin gated, so scripts
+//   simulating the app's own clients send the deployment origin, while
+//   NV-05 explicitly sends a foreign one to test the gate.
 // - Every script prints a RESULT line that is copied verbatim into the
 //   evidence log.
+
+import WebSocket from "ws";
 
 export const STAGING_BASE =
   process.env.NV_BASE_URL ?? "https://maishare-nv-staging.panudetjt.workers.dev";
@@ -16,19 +22,26 @@ export function wsUrl(base) {
   return base.replace(/^http/, "ws") + "/ws";
 }
 
-/** open a signaling socket and resolve once the welcome arrives */
-export function join(base, { room, peer, name = "nv" }) {
+/**
+ * Open a signaling socket and resolve once the welcome arrives.
+ * opts.origin overrides the Origin header (defaults to the deployment's own
+ * origin — passes the same-origin gate; pass anything else to test the gate).
+ */
+export function join(base, { room, peer, name = "nv" }, { origin } = {}) {
+  const wsOrigin = origin ?? new URL(base).origin;
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${wsUrl(base)}?room=${room}&peer=${peer}&name=${name}`);
+    const ws = new WebSocket(`${wsUrl(base)}?room=${room}&peer=${peer}&name=${name}`, {
+      origin: wsOrigin,
+    });
     const timer = setTimeout(() => {
       try {
         ws.close();
       } catch {}
       reject(new Error(`join timeout: ${room}/${peer}`));
     }, 15_000);
-    ws.onerror = () => {
+    ws.onerror = (err) => {
       clearTimeout(timer);
-      reject(new Error(`ws error: ${room}/${peer}`));
+      reject(new Error(`ws error: ${room}/${peer} — ${err?.message ?? "unknown"}`));
     };
     ws.onmessage = (ev) => {
       const msg = JSON.parse(String(ev.data));
@@ -40,8 +53,8 @@ export function join(base, { room, peer, name = "nv" }) {
   });
 }
 
-/** close and wait for the close to flush (bounded — some sockets never
- * deliver the close event, and a hung close must not hang the script) */
+/** close and wait for the close to flush (bounded — a hung close must not
+ * hang the script) */
 export function quit(ws) {
   return new Promise((resolve) => {
     if (!ws || ws.readyState >= 2) return resolve();

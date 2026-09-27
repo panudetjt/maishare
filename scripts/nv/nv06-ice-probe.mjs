@@ -13,10 +13,14 @@
 import { spawn } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { chromium } from "playwright-core";
-import { runId } from "./nv-common.mjs";
+import WebSocket from "ws";
+import { runId, wsUrl } from "./nv-common.mjs";
 
+// NV_BASE_URL (e.g. the staging deploy) tests the relay filter against a
+// remote deployment; default runs everything locally via `vp preview`
 const PORT = "8798";
-const BASE = `http://localhost:${PORT}`;
+const BASE = process.env.NV_BASE_URL ?? `http://localhost:${PORT}`;
+const LOCAL = !process.env.NV_BASE_URL;
 const PROBE_PORT = 55921;
 const tag = runId();
 const ROOM = `nvx06-${tag}`;
@@ -44,11 +48,14 @@ let probed = 0;
 probe.on("message", () => probed++);
 await new Promise((r) => probe.bind(PROBE_PORT, r));
 
-// 2) local preview = real workerd signaling + the SPA
-const server = spawn("pnpm", ["exec", "vp", "preview", "--port", PORT, "--strictPort"], {
-  stdio: "ignore",
-  detached: true,
-});
+// 2) local preview = real workerd signaling + the SPA (skipped for NV_BASE_URL)
+let server = null;
+if (LOCAL) {
+  server = spawn("pnpm", ["exec", "vp", "preview", "--port", PORT, "--strictPort"], {
+    stdio: "ignore",
+    detached: true,
+  });
+}
 const deadline = Date.now() + 30_000;
 let up = false;
 while (Date.now() < deadline && !up) {
@@ -59,7 +66,7 @@ while (Date.now() < deadline && !up) {
   }
 }
 if (!up) {
-  console.error("preview server did not start — run `vp build` first");
+  console.error(`server at ${BASE} did not start — run 'vp build' first?`);
   process.exit(1);
 }
 
@@ -81,9 +88,11 @@ console.log("victim page loaded, attacker connecting...");
 // 4) the attacker: a signaling socket that delivers the crafted offer.
 //    Peer id sorts after every uuid char so the victim takes the polite role
 //    and applies our offer directly instead of offering first.
-const attackerWs = new WebSocket(
-  `ws://localhost:${PORT}/ws?room=${ROOM}&peer=zznvattacker&name=nvattacker`,
-);
+// the attacker simulates the app's own client (same-origin Origin header) —
+// the vector under test is the candidate filter at the relay, not the origin gate
+const attackerWs = new WebSocket(`${wsUrl(BASE)}?room=${ROOM}&peer=zznvattacker&name=nvattacker`, {
+  origin: new URL(BASE).origin,
+});
 let victimPeer = null;
 let sent = false;
 const victim = await new Promise((resolve, reject) => {
@@ -125,12 +134,20 @@ console.log(
     ? `victim's browser sent ${probed} packet(s) to 127.0.0.1:${PROBE_PORT} — it dialed the attacker-supplied internal candidate`
     : `no packets reached 127.0.0.1:${PROBE_PORT} within 15s`,
 );
+if (ok && LOCAL) {
+  console.log(
+    `\n(local run: both peers are 127.0.0.1 = provable-LAN, so candidates are` +
+      ` kept by design — this is the LAN fix-safety path, not an attack vector)`,
+  );
+}
 
 await browser.close();
 attackerWs.close?.();
-try {
-  process.kill(-server.pid, "SIGTERM");
-} catch {}
+if (server) {
+  try {
+    process.kill(-server.pid, "SIGTERM");
+  } catch {}
+}
 probe.close();
 
 console.log(

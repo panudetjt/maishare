@@ -21,7 +21,7 @@ testing decisions call for.
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** done (see fix commit)
 
 - [ ] Pure helper unit table: private/loopback/ULA/link-local candidates
       dropped when sender↔receiver relation is not provable; kept when it is

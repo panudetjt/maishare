@@ -17,7 +17,7 @@ unchanged; `curl`-style headerless clients are denied with the same 403.
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** done (see fix commit)
 
 - [ ] Upgrade with a foreign `Origin` (e.g. `https://evil.example`) is refused
       `403` before the DO: no WebSocket, no announce, discovery unchanged for

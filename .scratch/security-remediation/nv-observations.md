@@ -76,8 +76,8 @@ scripts/nv/nv02-lobby-load.mjs`. The audit's ~225k-pair linearity harness is
 
 - [x] Staged flood done: 100 rooms joined once, sockets dropped immediately,
       75 s token-grace observed (`scripts/nv/nv04-do-rows.mjs`).
-- Result: **persistence confirmed live (matches the audit); decision pending
-  (owner): per-address creation cap vs TTL cleanup alarm**
+- Result: **persistence confirmed live; DECIDED + FIXED — TTL cleanup alarm
+  (drain + 60s → the DO deletes all of its storage)**
 - Date: 2026-09-27 · Deciding facts: 100 DO instances created in ~80 s from one
   address with bare join-and-drop requests; after the 75 s grace the ownership
   token row was wiped by the cleanup alarm and a **fresh claim succeeded**
@@ -93,10 +93,18 @@ scripts/nv/nv02-lobby-load.mjs`. The audit's ~225k-pair linearity harness is
   join mints ~80 KB of permanent storage for any client, one IP at a time.
   (The 2k "errors" on Room instances are the flood script's abrupt socket
   drops — expected, not a worker defect.)
-- Decision → follow-up ticket: per-address creation cap vs TTL cleanup alarm;
-  the 27.61 MB figure is the baseline to argue from.
+- Decision: **TTL cleanup alarm** over a per-address creation cap — it
+  reclaims every abandoned room with no cross-DO state, and the transient
+  spike a flood can create is bounded (~80 KB × joins in one 60 s window,
+  then reclaimed; measured ≈ 1.6 MB/s per flooding IP worst-case).
+  Implemented in `server/worker.ts`: the drain path schedules the alarm and
+  `alarm()` now runs `storage.deleteAll()` for an empty roster (roomId +
+  tokens wiped; a rejoin re-seeds both, tokens re-mint per SEC-08).
+  Covered by `server/worker-gates.test.ts` (drain → storage empty → fresh
+  claim works).
 - Cleanup when done inspecting: `node scripts/nv/cleanup-staging.mjs` deletes
-  the worker and all 27.61 MB with it.
+  the worker and all 27.61 MB with it. Post-fix, such a pile can no longer
+  accumulate anyway — abandoned rooms self-reclaim within ~60 s.
 
 ## NV-05 — cross-origin WS poisoning of discovery
 
@@ -113,10 +121,14 @@ scripts/nv/nv02-lobby-load.mjs`. The audit's ~225k-pair linearity harness is
   provable, so no names/counts leaked).
 - Evidence: script output; rerun against staging:
   `node scripts/nv/nv05-cross-origin.mjs`.
-- Countermeasure (warranted): **upgrade-time Origin allowlist** → written up
-  as ticket `issues/12-origin-allowlist.md` (status ready-for-agent). Owner
-  confirmation with a true cross-origin _browser_ page folds into that
-  ticket's acceptance test.
+- Countermeasure (warranted): **upgrade-time Origin allowlist** —
+  IMPLEMENTED + VERIFIED. `server/worker.ts` refuses `/ws` upgrades with a
+  missing or foreign `Origin` header (403, before the DO is reached);
+  `ALLOWED_ORIGINS` env adds extra hosts; same-origin covers every default
+  deployment. Post-fix rerun (`scripts/nv/nv05-cross-origin.mjs`): foreign
+  Origin → 403, headerless → 403, same-origin join works, the hostile-only
+  room never reaches discovery while the own-client room announces normally.
+  Full e2e suite 45/45. Ticket: `issues/12-origin-allowlist.md` (done).
 
 ## NV-06 — SDP/ICE LAN probing
 

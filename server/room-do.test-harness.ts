@@ -81,6 +81,10 @@ export class MockStorage {
   delete(key: string): Promise<boolean> {
     return Promise.resolve(this.map.delete(key));
   }
+  deleteAll(): Promise<void> {
+    this.map.clear();
+    return Promise.resolve();
+  }
   list(opts?: { prefix?: string }): Map<string, unknown> {
     if (!opts?.prefix) return new Map(this.map);
     return new Map([...this.map].filter(([k]) => k.startsWith(opts.prefix!)));

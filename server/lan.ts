@@ -120,6 +120,29 @@ export function isValidIp(s: string): boolean {
  * the same address), so it is a discovery *candidate* but never proves enough
  * to disclose roster content.
  */
+/**
+ * NV-06: is this address internal/limited-scope — loopback, RFC1918, CGNAT or
+ * link-local IPv4, IPv6 loopback/ULA/link-local, or their v4-mapped forms?
+ * These are exactly the addresses a hostile SDP must not make a victim's
+ * browser dial unless the peers are provably on one network.
+ */
+export function isPrivateAddress(s: string): boolean {
+  if (!s) return false;
+  const t = s.trim().toLowerCase().replace(/%.*$/, "");
+  const v4 = v4ToInt(t);
+  if (v4 != null) return isPrivateV4(v4);
+  const g = v6Groups(t);
+  if (!g) return false;
+  if (g.slice(0, 5).every((v) => v === 0)) {
+    if (g[5] === 0xffff) return isPrivateV4(((g[6] << 16) | g[7]) >>> 0); // v4-mapped
+    return true; // :: and ::1 loopback
+  }
+  const first = g[0] >> 8;
+  if (first === 0xfc || first === 0xfd) return true; // ULA fc00::/7
+  if ((g[0] & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
+  return false;
+}
+
 export function provableLan(a: string, b: string): boolean {
   if (!a || !b) return false;
   a = a.trim().toLowerCase();

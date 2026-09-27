@@ -1,42 +1,68 @@
-// NV-05 (cross-origin WS poisoning of discovery): can a socket from another
-// origin plant a room into the discovery lobby? A browser would send an
-// Origin header on the cross-origin WS handshake; a server-side origin
-// allowlist would reject it. This script connects WITHOUT same-origin
-// guarantees (Node's WebSocket sends no Origin, equivalent to the most
-// permissive cross-origin client) and with an explicit foreign Origin header
-// where the runtime permits it, then checks /api/discover for the planted
-// room. If the room appears, the app layer has no origin gate -> validated.
+// NV-05 (cross-origin WS poisoning of discovery) — post-fix verification.
+// The /ws endpoint is same-origin gated (ticket 12): a foreign Origin and a
+// headerless upgrade must both be refused 403 before any socket exists, while
+// a same-origin (the app's own) socket still works end-to-end.
 //
 // Usage: node scripts/nv/nv05-cross-origin.mjs   (against staging)
 import { join, quit, discover, runId, STAGING_BASE } from "./nv-common.mjs";
 
 const tag = runId();
-const room = `nvx05-${tag}`;
+const attackRoom = `nvx05a-${tag}`; // only hostile sockets ever touch this
+const ownRoom = `nvx05o-${tag}`; // the app's own client sanity room
+let failures = 0;
 
-console.log(`planting room ${room} via a foreign socket...`);
-// Node's undici WebSocket forbids setting Origin directly; the absence of an
-// Origin header is itself the strongest case (no gate at all). If a future
-// runtime adds one, revisit with a real cross-origin browser page.
-const planted = await join(STAGING_BASE, { room, peer: `nvevil-${tag}`, name: "poisoner" });
-console.log("foreign socket joined and received a welcome — server checked no origin");
+// 1) foreign Origin — the exact vector the staging run validated on 2026-09-27
+let foreign;
+try {
+  foreign = await join(
+    STAGING_BASE,
+    { room: attackRoom, peer: `nvevil-${tag}`, name: "poisoner" },
+    { origin: "https://evil.example" },
+  );
+  console.log("FOREIGN ORIGIN JOINED — gate did not fire");
+  failures++;
+  await quit(foreign.ws);
+} catch (err) {
+  console.log(`foreign Origin refused at the door: ${err.message.split(" — ")[1] ?? err.message}`);
+}
 
-// the roster change announces to the lobby; give it a beat
-await new Promise((r) => setTimeout(r, 2000));
+// 2) headerless (non-browser) client — no Origin header at all
+try {
+  const headerless = await join(
+    STAGING_BASE,
+    { room: attackRoom, peer: `nvnohdr-${tag}`, name: "headerless" },
+    { origin: "" },
+  );
+  console.log("HEADERLESS JOINED — gate did not fire");
+  failures++;
+  await quit(headerless.ws);
+} catch (err) {
+  console.log(`headerless refused at the door: ${err.message.split(" — ")[1] ?? err.message}`);
+}
+
+// 3) sanity: the app's own (same-origin) client still works end-to-end
+const own = await join(STAGING_BASE, { room: ownRoom, peer: `nvown-${tag}`, name: "own-app" });
+console.log("same-origin join still works (welcome received)");
+
 const rooms = await discover(STAGING_BASE);
-const hit = rooms.find((r) => r.roomId === room);
-
+const attackHit = rooms.some((r) => r.roomId === attackRoom);
+const ownHit = rooms.some((r) => r.roomId === ownRoom);
 console.log(
-  hit ? `poisoned room IS discoverable: ${JSON.stringify(hit)}` : "planted room not discoverable",
+  attackHit
+    ? "hostile-only room IS discoverable (leak)"
+    : "hostile-only room is NOT in discovery (nothing was announced for it)",
 );
-await quit(planted.ws);
+console.log(
+  ownHit
+    ? "own room announced normally (announce path intact)"
+    : "own room missing from discovery?!",
+);
 
 console.log(
-  hit
-    ? `\nRESULT nv-05: VALIDATED at the app layer — a non-browser/cross-origin socket` +
-        ` planted a discovery-visible room; no upgrade-time origin check exists.` +
-        ` Countermeasure if the owner confirms with a real cross-origin browser:` +
-        ` upgrade-time Origin allowlist (follow-up ticket).`
-    : `\nRESULT nv-05: NOT validated at the app layer — planted room stayed out of` +
-        ` discovery (an edge rule or announce gate may already block it).`,
+  failures === 0 && !attackHit && ownHit
+    ? `\nRESULT nv-05: gate holds — foreign-Origin and headerless upgrades get 403` +
+        ` before any socket, discovery stays clean, same-origin flows unaffected.` +
+        ` Countermeasure verified (ticket 12).`
+    : `\nRESULT nv-05: gate has a leak (failures=${failures}, attackRoomHit=${attackHit}, ownRoomHit=${ownHit}).`,
 );
 process.exit(0);
