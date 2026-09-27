@@ -13,6 +13,12 @@
   "assets": {
     "not_found_handling": "single-page-application",
     "binding": "ASSETS",
+    // Worker-first ONLY for the paths that need dynamic behavior — everything
+    // else stays a direct (free, unmetered) asset response. The list is
+    // exhaustive on purpose: routing treats the array as an exclusive
+    // allowlist in preview, while deploy falls back to default routing for
+    // unlisted paths — enumerating every worker path makes both identical.
+    "run_worker_first": ["/", "/r/*", "/ws", "/healthz", "/api/*"],
   },
   "durable_objects": {
     "bindings": [

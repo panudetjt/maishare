@@ -117,8 +117,39 @@ code {
 /* ---------- home ---------- */
 
 .home-hero {
+  position: relative;
   text-align: center;
   padding: 44px 0 8px;
+}
+
+/* install offer sits top-right of the hero, clear of the centered brand */
+.hero-install {
+  position: absolute;
+  top: 10px;
+  right: 0;
+}
+.install-hint {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  max-width: 250px;
+  padding: 10px 12px;
+  background: var(--card2);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  text-align: left;
+  font-size: 13px;
+  color: var(--dim);
+}
+.install-hint strong {
+  color: var(--text);
+}
+@media (max-width: 800px) {
+  .hero-install {
+    top: -6px;
+  }
 }
 
 .brand {

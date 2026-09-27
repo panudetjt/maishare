@@ -5,6 +5,7 @@ import { loadName, makeRoomCode, makeRoomKey, saveName } from "../lib/device";
 import { useLanRooms } from "../lib/discovery";
 import { clearRecents, loadRecents, type Recent } from "../lib/recents";
 import { Bolt, Logo, QrIcon, TrashIcon, UsersIcon, WifiIcon } from "../components/Icons";
+import { InstallButton } from "../components/InstallPrompt";
 import { NearbyShare } from "../components/NearbyShare";
 
 const indexSearchSchema = z.object({
@@ -79,6 +80,9 @@ function HomeComponent() {
   return (
     <div className="page home">
       <header className="home-hero">
+        <div className="hero-install">
+          <InstallButton />
+        </div>
         <div className="brand">
           <Logo size={30} />
           <span className="brand-name">maishare</span>

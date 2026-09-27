@@ -1,7 +1,12 @@
 import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
+import { initInstall } from "./lib/install";
 import "./styles/global.css";
+
+// capture beforeinstallprompt as early as possible — the event can fire
+// before React mounts, and we want it for the home-page install button
+initInstall();
 
 // StrictMode is omitted on purpose: double-mounted effects would tear down and
 // rebuild the WebRTC mesh on every mount in development.

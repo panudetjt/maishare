@@ -18,6 +18,26 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0b0d12" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- social previews: /r/:roomId invites are rewritten per room by the
+         worker (server/worker.ts) — title names the room and the image URLs
+         become absolute for the serving origin -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="maishare" />
+    <meta property="og:title" content="maishare — local-first p2p sharing" />
+    <meta
+      property="og:description"
+      content="Share files and text peer-to-peer, end-to-end encrypted. No cloud, no accounts — data never leaves your network."
+    />
+    <meta property="og:image" content="/og.png" />
+    <meta property="og:image:width" content="2400" />
+    <meta property="og:image:height" content="1260" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="maishare — local-first p2p sharing" />
+    <meta
+      name="twitter:description"
+      content="Share files and text peer-to-peer, end-to-end encrypted. No cloud, no accounts — data never leaves your network."
+    />
+    <meta name="twitter:image" content="/og.png" />
     <title>maishare — local-first p2p sharing</title>
   </head>
   <body>

@@ -1,9 +1,45 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { defineConfig, lazyPlugins } from "vite-plus";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { cloudflare } from "@cloudflare/vite-plugin";
 
+// og.png is referenced from social meta with a content-hash query (?v=…) so
+// every deploy that changes the image also changes its URL — chat-app
+// crawlers (Facebook/WhatsApp) otherwise cache the first preview forever.
+const ogHash = createHash("sha256")
+  .update(readFileSync(new URL("./public/og.png", import.meta.url)))
+  .digest("hex")
+  .slice(0, 12);
+
+// canonical origin baked into the static home page's social tags (set
+// PUBLIC_ORIGIN when building behind a custom domain). Room invites don't
+// need this — the worker rewrites them per request origin at serve time.
+const PUBLIC_ORIGIN = (process.env.PUBLIC_ORIGIN ?? "https://maishare.panudetjt.workers.dev")
+  .trim()
+  .replace(/\/+$/, "");
+
+/** bake absolute, cache-busted social URLs into the static home page —
+ * crawlers ignore relative og:image and cache the first URL forever */
+function ogAbsoluteUrls(): import("vite-plus").Plugin {
+  return {
+    name: "og-absolute-urls",
+    transformIndexHtml(html) {
+      return html
+        .replaceAll('content="/og.png"', `content="${PUBLIC_ORIGIN}/og.png?v=${ogHash}"`)
+        .replace(
+          /(<meta property="og:site_name" content="maishare" \/>)/,
+          `$1\n    <meta property="og:url" content="${PUBLIC_ORIGIN}/" />`,
+        );
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
+  define: {
+    __OG_ASSET_VERSION__: JSON.stringify(ogHash),
+  },
   staged: {
     "*": "vp check --fix",
   },
@@ -20,6 +56,7 @@ export default defineConfig(({ mode }) => ({
   },
   plugins: lazyPlugins(() => {
     const plugins = [
+      ogAbsoluteUrls(),
       tanstackRouter({
         target: "react",
         autoCodeSplitting: true,

@@ -6,9 +6,13 @@
 // rooms reachable from the caller's own network. Raw IPs never leave the DOs.
 
 import { sameLan } from "./lan";
+import { rewriteShareHtml } from "./share-html";
 
 const RE_ROOM = /^[\w-]{2,64}$/;
 const RE_PEER = /^[\w-]{8,64}$/;
+/** invite navigations (shareable links) — handled by the worker for per-room
+ * social previews; run_worker_first in wrangler.jsonc routes these here */
+const RE_ROOM_PATH = /^\/r\/([\w-]{2,64})$/;
 
 const LOBBY_NAME = "global";
 /** rooms stop being advertised this long after their last roster change */
@@ -357,6 +361,24 @@ export default {
       const lobby = env.LOBBY.get(env.LOBBY.idFromName(LOBBY_NAME));
       return lobby.fetch("https://lobby/discover", {
         headers: { "x-client-ip": req.headers.get("CF-Connecting-IP") ?? "" },
+      });
+    }
+    // HTML navigations flow through here ("/" via run_worker_first, /r/:room
+    // and any deep link as unmatched paths) so social previews are rewritten
+    // for the serving origin — crawlers ignore relative og:image, and the
+    // image URL carries a build hash that busts chat-app preview caches
+    if (req.method === "GET") {
+      const res = await env.ASSETS.fetch(req);
+      if (!res.headers.get("content-type")?.includes("text/html")) return res;
+      const room = RE_ROOM_PATH.exec(url.pathname)?.[1];
+      return new Response(rewriteShareHtml(await res.text(), url.origin, room), {
+        status: res.status,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          // rewritten per room — short TTL so previews refresh, and caching
+          // can never serve one room's markup under another room's URL
+          "cache-control": res.headers.get("cache-control") ?? "public, max-age=300",
+        },
       });
     }
     return env.ASSETS.fetch(req);
