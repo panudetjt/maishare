@@ -1,0 +1,77 @@
+// Shared helpers for the NV (needs-validation) test scripts — see
+// .scratch/security-remediation/nv-observations.md for what each script
+// answers and where the results are recorded.
+//
+// Usage notes:
+// - Staging scripts take the deploy URL via NV_BASE_URL (default: the
+//   isolated staging worker deploy-staging.mjs creates).
+// - Every script prints a RESULT line that is copied verbatim into the
+//   evidence log.
+
+export const STAGING_BASE =
+  process.env.NV_BASE_URL ?? "https://maishare-nv-staging.panudetjt.workers.dev";
+
+/** websocket signaling URL for a base URL */
+export function wsUrl(base) {
+  return base.replace(/^http/, "ws") + "/ws";
+}
+
+/** open a signaling socket and resolve once the welcome arrives */
+export function join(base, { room, peer, name = "nv" }) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${wsUrl(base)}?room=${room}&peer=${peer}&name=${name}`);
+    const timer = setTimeout(() => {
+      try {
+        ws.close();
+      } catch {}
+      reject(new Error(`join timeout: ${room}/${peer}`));
+    }, 15_000);
+    ws.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error(`ws error: ${room}/${peer}`));
+    };
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(String(ev.data));
+      if (msg.t === "welcome") {
+        clearTimeout(timer);
+        resolve({ ws, welcome: msg, send: (o) => ws.send(JSON.stringify(o)) });
+      }
+    };
+  });
+}
+
+/** close and wait for the close to flush (bounded — some sockets never
+ * deliver the close event, and a hung close must not hang the script) */
+export function quit(ws) {
+  return new Promise((resolve) => {
+    if (!ws || ws.readyState >= 2) return resolve();
+    const timer = setTimeout(resolve, 3000);
+    ws.onclose = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    try {
+      ws.close();
+    } catch {
+      clearTimeout(timer);
+      resolve();
+    }
+  });
+}
+
+export async function discover(base) {
+  const res = await fetch(`${base}/api/discover`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`discover ${res.status}`);
+  return (await res.json()).rooms ?? [];
+}
+
+export function percentile(values, p) {
+  if (!values.length) return NaN;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
+}
+
+/** unique-ish room/peer ids for each run */
+export function runId() {
+  return Date.now().toString(36).slice(-6) + Math.random().toString(36).slice(2, 5);
+}
