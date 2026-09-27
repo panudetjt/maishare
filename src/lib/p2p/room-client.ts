@@ -436,26 +436,30 @@ export class RoomClient {
     }
   }
 
-  /** one message = optional text + optional files, all sharing one group id */
-  sendMessage(text: string, files: File[] | FileList) {
+  /** one message = optional text + optional files, all sharing one group id.
+   * Returns the outbound transfer views it created (empty for text-only) so
+   * callers — the WebMCP tools in particular — get ids without waiting out
+   * the 50 ms snapshot debounce */
+  sendMessage(text: string, files: File[] | FileList): TransferView[] {
     const t = text.trim();
     const list = Array.from(files).filter((f) => f && f.size >= 0);
-    if (!t && !list.length) return;
+    if (!t && !list.length) return [];
     if (!list.length) {
       this.sendChat(t);
-      return;
+      return [];
     }
     const groupId = rid();
     if (t) this.sendChat(t, groupId);
-    this.sendFiles(list, groupId);
+    return this.sendFiles(list, groupId);
   }
 
-  sendFiles(files: File[] | FileList, groupId: string = rid()) {
+  sendFiles(files: File[] | FileList, groupId: string = rid()): TransferView[] {
     const list = Array.from(files).filter((f) => f && f.size >= 0);
-    if (!list.length) return;
+    if (!list.length) return [];
     const openPeers = [...this.peers.values()].filter((p) => p.dc?.readyState === "open");
     const sealed =
       openPeers.length === 0 ? undefined : this.cipher !== null && openPeers.every((p) => p.proven);
+    const views: TransferView[] = [];
     for (const file of list) {
       const isImage = (file.type || "").startsWith("image/");
       const view: TransferView = {
@@ -478,6 +482,7 @@ export class RoomClient {
         ...(isImage ? { blobUrl: URL.createObjectURL(file) } : {}),
       };
       this.transfers = [view, ...this.transfers];
+      views.push(view);
       // content-type sniffing kicks off immediately so queued/deferred files
       // already show the right preview and icon
       void this.sniffTransfer(view, file);
@@ -494,6 +499,7 @@ export class RoomClient {
       this.toast("Waiting for a peer — files will send automatically when someone joins", "info");
     }
     this.schedule();
+    return views;
   }
 
   /**
