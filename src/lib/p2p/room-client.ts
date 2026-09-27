@@ -24,6 +24,13 @@ export const MAX_TRANSFER_SIZE = 2 ** 31; // 2 GiB
 export const MAX_NAME_CHARS = 256;
 export const MAX_MIME_CHARS = 128;
 
+/** per-message inbound chat cap (SEC-03) — mirrors the composer's maxLength,
+ * so a peer's oversized frame is stored truncated to what we could have sent */
+export const MAX_CHAT_CHARS = 8000;
+/** retained chat messages (rolling cap, oldest dropped first) — keeps a peer
+ * streaming maximal frames from growing memory and per-render cost unbounded */
+export const MAX_RETAINED_CHATS = 200;
+
 export type PeerStatus = "connecting" | "open" | "closed" | "failed";
 
 /** one blocking consent decision per unproven peer (keyed rooms only) */
@@ -371,6 +378,7 @@ export class RoomClient {
       sealed,
     };
     this.chats = [...this.chats, msg];
+    this.capChats();
     this.schedule();
     const frame: Control = { t: "chat", id: msg.id, text: t, at: msg.at, g: groupId };
     if (openPeers.length) {
@@ -929,6 +937,7 @@ export class RoomClient {
         system: true,
       },
     ];
+    this.capChats();
     this.toast("A message could not be decrypted — see the warning in the timeline", "error");
     // back-channel is always plain so the sender can parse it regardless of keys
     const dc = ctx.dc;
@@ -985,6 +994,12 @@ export class RoomClient {
     }
   }
 
+  private capChats() {
+    if (this.chats.length > MAX_RETAINED_CHATS) {
+      this.chats = this.chats.slice(-MAX_RETAINED_CHATS);
+    }
+  }
+
   private onControl(ctx: PeerCtx, c: Control, sealed: boolean) {
     switch (c.t) {
       case "hello":
@@ -1007,19 +1022,25 @@ export class RoomClient {
         this.schedule();
         break;
       case "chat":
+        // SEC-03: inbound text is stored truncated to the composer's outbound
+        // limit and the retained timeline rolls — a peer streaming maximal
+        // frames can neither grow memory unbounded nor outpace manual Clear.
+        // Applies to plaintext frames regardless of the room key (wrong-key
+        // members are bounded identically).
         this.chats = [
           ...this.chats,
           {
-            id: c.id,
+            id: typeof c.id === "string" ? c.id : rid(),
             peerId: ctx.peerId,
             name: ctx.name,
-            text: c.text,
-            at: c.at,
+            text: String(c.text ?? "").slice(0, MAX_CHAT_CHARS),
+            at: typeof c.at === "number" && Number.isFinite(c.at) ? c.at : Date.now(),
             mine: false,
             groupId: c.g,
             sealed,
           },
         ];
+        this.capChats();
         this.schedule();
         break;
       case "undecryptable":
