@@ -43,6 +43,12 @@ export const INCOMING_START_COOLDOWN_MS = 1000;
 /** an inbound transfer with no chunk progress for this long has stalled and is
  * failed by the watchdog riding the per-peer ping interval (SEC-04) */
 export const INCOMING_STALE_MS = 30_000;
+
+/** how long after a *completed* inbound transfer its late tail chunks stay
+ * silent — chunks carry no transfer id (SEC-04), so a tail arriving after the
+ * file-end can only be wire reorder or a sender flush of a file the receiver
+ * already holds whole; telling the user to resend here would be a false alarm */
+export const DONE_TAIL_GRACE_MS = 15_000;
 /** file-cancel reason sent back when a transfer is retired as stale — one
  * string shared by the watchdog and the bulk Clear */
 export const STALE_CANCEL_REASON = "stalled";
@@ -189,6 +195,9 @@ interface PeerCtx {
   startBlockedUntil: number;
   /** when the peer context was allocated (monotonic) — drives the phantom-join sweep */
   createdAt: number;
+  /** performance.now() of this connection's last *completed* inbound transfer —
+   * gates the orphan-chunk alarm so a finished file's late tail stays silent */
+  lastDoneAt: number | null;
   /** one unreadable-frame warning per connection — no toast storms */
   undecryptableWarned: boolean;
 }
@@ -734,6 +743,7 @@ export class RoomClient {
       withheldFiles: [],
       startBlockedUntil: 0,
       createdAt: performance.now(),
+      lastDoneAt: null,
       undecryptableWarned: false,
     };
     pc.onicecandidate = ({ candidate }) => {
@@ -1265,6 +1275,11 @@ export class RoomClient {
   private onChunk(ctx: PeerCtx, body: Uint8Array<ArrayBuffer>) {
     const inc = ctx.incoming;
     if (!inc) {
+      // a completed transfer's late tail (wire reorder / sender flush): the
+      // file is already whole, so dropping it silently beats a false "resend"
+      if (ctx.lastDoneAt !== null && performance.now() - ctx.lastDoneAt <= DONE_TAIL_GRACE_MS) {
+        return;
+      }
       // data without a header: the file-start was lost (dropped sealed frame,
       // stale sender…) — surface it, never stay silent
       this.notifyUndecryptable(ctx, "orphan");
@@ -1298,6 +1313,7 @@ export class RoomClient {
     const inc = ctx.incoming;
     if (!inc || inc.view.id !== id) return;
     ctx.incoming = null;
+    ctx.lastDoneAt = performance.now();
     const v = inc.view;
     const chunks = inc.chunks;
     v.status = "done";
