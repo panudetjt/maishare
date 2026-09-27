@@ -5,7 +5,7 @@
 // (IP -> connection count + display names), and /api/discover lists only the
 // rooms reachable from the caller's own network. Raw IPs never leave the DOs.
 
-import { provableLan, sameLan } from "./lan";
+import { isValidIp, provableLan, sameLan } from "./lan";
 import { rewriteShareHtml } from "./share-html";
 
 const RE_ROOM = /^[\w-]{2,64}$/;
@@ -143,6 +143,7 @@ export class Room {
     const ips: Record<string, number> = {};
     const names: string[] = [];
     for (const { meta } of this.realRoster()) {
+      if (!meta.ip) continue; // identity-less join (invalid forwarded header)
       ips[meta.ip] = (ips[meta.ip] ?? 0) + 1;
       if (names.length < 8 && !names.includes(meta.name)) names.push(meta.name);
     }
@@ -184,8 +185,12 @@ export class Room {
       await this.state.storage.put("roomId", roomId);
     }
 
+    // SEC-10: identity fails closed. An absent header is the internal
+    // headerless dev fallback ("local"); a present-but-invalid value — an
+    // arbitrary string or the 'local' marker itself — contributes no identity
+    // and can therefore never become a matchable member address.
     const fwdIp = req.headers.get("CF-Connecting-IP");
-    const ip = fwdIp == null ? "local" : fwdIp;
+    const ip = fwdIp == null ? "local" : isValidIp(fwdIp) ? fwdIp : "";
     const probe = url.searchParams.get("probe") === "1";
 
     // SEC-05: refuse joins beyond the room-size and per-address caps BEFORE
@@ -340,7 +345,10 @@ export class Lobby {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/discover") {
-      const ip = req.headers.get("x-client-ip") ?? "";
+      // SEC-10: the caller's identity is validated like the join path's —
+      // an invalid external value matches nothing
+      const fwd = req.headers.get("x-client-ip");
+      const ip = fwd == null ? "local" : isValidIp(fwd) ? fwd : "";
       // SEC-07: non-provable matches return the room id only — member names,
       // counts and creation time are withheld (roster content remains
       // available to actual joiners via the welcome message after signaling)
@@ -441,9 +449,13 @@ export default {
       // the DO stub fetch drops the original client context, so the edge IP
       // travels in a private header — only /discover reads it
       const lobby = env.LOBBY.get(env.LOBBY.idFromName(LOBBY_NAME));
-      return lobby.fetch("https://lobby/discover", {
-        headers: { "x-client-ip": req.headers.get("CF-Connecting-IP") ?? "" },
-      });
+      // absence forwards as absence: only the deployment's own headerless
+      // traffic maps to the internal 'local' fallback — a present-but-garbage
+      // value travels verbatim and fails closed in the Lobby (SEC-10)
+      const clientIp = req.headers.get("CF-Connecting-IP");
+      const headers: HeadersInit = {};
+      if (clientIp != null) headers["x-client-ip"] = clientIp;
+      return lobby.fetch("https://lobby/discover", { headers });
     }
     // HTML navigations flow through here ("/" via run_worker_first, /r/:room
     // and any deep link as unmatched paths) so social previews are rewritten

@@ -101,8 +101,9 @@ export class MockDOState {
   acceptWebSocket(ws: MockSocket) {
     this.sockets.push(ws);
   }
+  /** live sockets only — workerd drops closed hibernating sockets from the pool */
   getWebSockets(): MockSocket[] {
-    return this.sockets;
+    return this.sockets.filter((s) => s.closed === null);
   }
 }
 

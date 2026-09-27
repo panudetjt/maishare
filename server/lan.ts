@@ -107,6 +107,19 @@ export function sameLan(a: string, b: string): boolean {
  * the same address), so it is a discovery *candidate* but never proves enough
  * to disclose roster content.
  */
+/**
+ * SEC-10: only a syntactically valid IPv4 or IPv6 address may act as a
+ * network identity. Arbitrary strings — including the 'local' fallback
+ * marker — fail closed, so they can never be supplied by an external request
+ * and never match an internal identity.
+ */
+export function isValidIp(s: string): boolean {
+  if (!s) return false;
+  const t = s.trim().toLowerCase();
+  if (v4ToInt(t) != null) return true;
+  return v6Groups(t) != null;
+}
+
 export function provableLan(a: string, b: string): boolean {
   if (!a || !b) return false;
   a = a.trim().toLowerCase();

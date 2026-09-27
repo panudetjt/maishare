@@ -35,9 +35,12 @@ async function announce(roomId: string, ips: Record<string, number>, names: stri
 
 async function discover(
   lobby: Lobby,
-  callerIp: string,
+  callerIp: string | null,
 ): Promise<{ rooms: Record<string, unknown>[] }> {
-  const res = await lobby.fetch(new Request(DISCOVER, { headers: { "x-client-ip": callerIp } }));
+  // callerIp null = the deployment's own headerless internal call
+  const headers: Record<string, string> = {};
+  if (callerIp != null) headers["x-client-ip"] = callerIp;
+  const res = await lobby.fetch(new Request(DISCOVER, { headers }));
   expect(res.status).toBe(200);
   return (await res.json()) as { rooms: Record<string, unknown>[] };
 }
@@ -67,7 +70,9 @@ describe("discovery disclosure gating (SEC-07)", () => {
 
   it("keeps the full response for the internal dev-marker match", async () => {
     const lobby = await announce("devroom", { local: 1 }, ["dev"]);
-    const data = await discover(lobby, "local");
+    // the internal flow arrives headerless — a supplied 'local' string is an
+    // external value and fails closed instead (covered by identity tests)
+    const data = await discover(lobby, null);
     expect(data.rooms[0]).toMatchObject({ roomId: "devroom", names: ["dev"] });
   });
 

@@ -72,9 +72,9 @@ export default defineConfig(({ mode }) => ({
     }
     return plugins;
   }),
-  server: {
-    host: true,
-  },
+  // SEC-10: dev/preview bind localhost by default — exposing the worker (and
+  // its forwarded-header identity trust) to the LAN stays the explicit --host
+  // opt-in the README documents, never a silent config default.
   build: {
     target: "es2022",
   },
