@@ -84,9 +84,9 @@ function RoomRoute() {
   // and the tools inherit the page's key, consent gating and queueing
   useEffect(() => {
     if (!client) return;
-    const dispose = registerRoomTools(client);
+    const dispose = registerRoomTools(() => client, undefined, { getInvite: () => inviteUrl });
     return () => dispose?.();
-  }, [client]);
+  }, [client, inviteUrl]);
 
   // legacy ?k= links: scrub the query and move the key into the fragment, so
   // the key stops appearing in any request line after landing
