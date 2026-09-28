@@ -20,6 +20,8 @@ import { ArrowLeft, CopyIcon, LockIcon, LockOpenIcon, Logo, QrIcon } from "../co
 export const roomSearchSchema = z.object({
   k: z.string().min(4).max(200).optional().catch(undefined),
   name: z.string().trim().max(32).optional().catch(undefined),
+  /** SEC-11: creator opt-in — any member may approve key shares in this room */
+  ks: z.literal("anyone").optional().catch(undefined),
 });
 
 export type RoomSearch = z.output<typeof roomSearchSchema>;
@@ -58,14 +60,37 @@ function RoomRoute() {
   // as a fallback and migrated below.
   const [fragmentKey] = useState(() => readKeyFromHash());
   const key = fragmentKey ?? search.k;
-  const { client, state } = useRoom(roomId, key, name);
+  const { client, state } = useRoom(
+    roomId,
+    key,
+    name,
+    search.ks === "anyone" ? "anyone" : undefined,
+  );
   const [showQr, setShowQr] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
   const [nameDraft, setNameDraft] = useState(name);
   const [copied, setCopied] = useState(false);
   const [pending, setPending] = useState<PendingFile[]>([]);
 
-  const inviteUrl = `${location.origin}/r/${roomId}${key ? `#k=${encodeURIComponent(key)}` : ""}`;
+  // a LAN-list join lands with no #k=; the key may arrive later via a member's
+  // key-offer — from then on invites and recents use it (the client itself is
+  // NOT rebuilt: it already holds the cipher)
+  const effectiveKey = key ?? state.selfKey ?? undefined;
+
+  const inviteUrl = `${location.origin}/r/${roomId}${effectiveKey ? `#k=${encodeURIComponent(effectiveKey)}` : ""}`;
+
+  // repair the URL fragment once a key is acquired, so reloads and invites
+  // carry the full key without rebuilding the running client
+  useEffect(() => {
+    if (!state.selfKey || key) return;
+    void navigate({
+      to: "/r/$roomId",
+      params: { roomId },
+      search: (prev) => ({ ...prev }),
+      hash: `k=${encodeURIComponent(state.selfKey!)}`,
+      replace: true,
+    });
+  }, [state.selfKey, key, roomId, navigate]);
 
   const setSearch = (patch: Partial<RoomSearch>) => {
     void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
@@ -76,8 +101,8 @@ function RoomRoute() {
     setPending((prev) => [...prev, ...files.map((file) => ({ id: uuid(), file }))]);
 
   useEffect(() => {
-    addRecent({ roomId, k: key, at: Date.now() });
-  }, [roomId, key]);
+    addRecent({ roomId, k: effectiveKey, at: Date.now() });
+  }, [roomId, effectiveKey]);
 
   // WebMCP (draft): expose the room pipeline as agent tools when the browser
   // provides document.modelContext — absent API degrades to a silent no-op,
@@ -95,7 +120,7 @@ function RoomRoute() {
     navigate({
       to: "/r/$roomId",
       params: { roomId },
-      search: (prev) => ({ name: prev.name }),
+      search: (prev) => ({ name: prev.name, ks: prev.ks }),
       hash: `k=${encodeURIComponent(fragmentKey ?? search.k!)}`,
       replace: true,
     });
@@ -167,7 +192,7 @@ function RoomRoute() {
         </div>
         <span className="room-code" title={`room ${roomId}`}>
           {roomId}
-          {key ? <LockIcon size={12} /> : null}
+          {effectiveKey ? <LockIcon size={12} /> : null}
         </span>
         <div className="header-actions">
           <button className="btn btn-sm" onClick={copyInvite}>
@@ -198,6 +223,13 @@ function RoomRoute() {
       </header>
 
       {showQr && <QrInvite url={inviteUrl} onClose={() => setShowQr(false)} />}
+
+      {state.kicked && (
+        <div className="notice" role="alert">
+          The room host removed you from this room. Reconnecting is disabled — ask for a fresh
+          invite if this was a mistake.
+        </div>
+      )}
 
       <div className="room-body">
         <PeerList state={state} />
@@ -230,6 +262,15 @@ function RoomRoute() {
         <ConsentGate
           req={state.consents[0]}
           onAnswer={(allow) => client.respondConsent(state.consents[0]!.peerId, allow)}
+        />
+      )}
+
+      {client && state.keyRequests[0] && (
+        <KeyShareGate
+          req={state.keyRequests[0]}
+          canEvict={state.hostId == null || state.selfId === state.hostId}
+          onAnswer={(allow) => client.respondKeyRequest(state.keyRequests[0]!.peerId, allow)}
+          onDismiss={() => client.dismissKeyRequest(state.keyRequests[0]!.peerId)}
         />
       )}
 
@@ -282,6 +323,63 @@ function ConsentGate({
             Send without end-to-end encryption
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Key-share gate: a peer joined without the room key (the "On your network"
+ * list opens the bare room URL) and asked for a share. The room's policy
+ * decides who answers: the host by default (with the exclusive "keep them
+ * out" removal), or every member when the room opted in. The key travels
+ * only over the DTLS-protected data channel after an explicit approval.
+ */
+function KeyShareGate({
+  req,
+  canEvict,
+  onAnswer,
+  onDismiss,
+}: {
+  req: ConsentRequest;
+  canEvict: boolean;
+  onAnswer: (allow: boolean) => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="consent-overlay">
+      <div
+        className="consent-panel panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="keyshare-title"
+      >
+        <span className="consent-icon" aria-hidden="true">
+          <LockIcon size={22} />
+        </span>
+        <h2 id="keyshare-title">{req.name} joined without the room key</h2>
+        <p>
+          They likely arrived through the “On your network” list, which opens the room without its
+          key. Share the key so they can read messages end-to-end? It travels only over the direct
+          encrypted connection to them.
+        </p>
+        <div className="consent-actions">
+          {canEvict ? (
+            <button className="btn" onClick={() => onAnswer(false)}>
+              Keep them out
+            </button>
+          ) : (
+            <button className="btn" onClick={onDismiss}>
+              Not now
+            </button>
+          )}
+          <button className="btn btn-primary" onClick={() => onAnswer(true)}>
+            Share the room key
+          </button>
+        </div>
+        {!canEvict && (
+          <p className="muted small">Only the room host can remove someone from this room.</p>
+        )}
       </div>
     </div>
   );

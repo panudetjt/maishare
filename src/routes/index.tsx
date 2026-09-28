@@ -31,6 +31,9 @@ function HomeComponent() {
   const [joinValue, setJoinValue] = useState("");
   const [recents, setRecents] = useState<Recent[]>(initialRecents);
   const [nearbyOpen, setNearbyOpen] = useState(false);
+  // SEC-11: by default only the room host answers key-share requests; the
+  // creator may open the decision to every member instead
+  const [anyMemberKeys, setAnyMemberKeys] = useState(false);
 
   // WebMCP (draft): home-page agent tools — create rooms, list recents and
   // run the nearby handshake by passing share codes as strings; the room
@@ -52,7 +55,7 @@ function HomeComponent() {
     void navigate({
       to: "/r/$roomId",
       params: { roomId: makeRoomCode() },
-      search: { name },
+      search: { name, ks: anyMemberKeys ? "anyone" : undefined },
       hash: `k=${encodeURIComponent(makeRoomKey())}`,
     });
   }
@@ -123,6 +126,16 @@ function HomeComponent() {
               onKeyDown={(e) => e.key === "Enter" && commitName(e.currentTarget.value)}
               aria-label="Your display name"
             />
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={anyMemberKeys}
+              onChange={(e) => setAnyMemberKeys(e.target.checked)}
+            />
+            <span className="muted small">
+              Let any member approve key shares (host only by default)
+            </span>
           </label>
           <button className="btn btn-primary btn-lg" onClick={startRoom} disabled={!webrtc}>
             <Bolt size={17} /> Create a room

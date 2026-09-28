@@ -120,7 +120,9 @@ only — the data path stays pure P2P.
   (one per room id) which relays offer/answer/candidates and nothing else;
   `/api/discover` asks the global **Lobby DO** for live rooms. Hardened at the edge:
   same-origin gate on upgrades, per-IP rate limits (30/min each on `/ws` and
-  `/api/discover` via the Workers Rate Limiting API), 16-member / 8-per-address join
+  `/api/discover` via the Workers Rate Limiting API), per-connection signaling
+  flood caps in the Room DO (token bucket, close 4409), exponential probe
+  backoff for unreachable LAN rooms, 16-member / 8-per-address join
   caps, DO-minted ownership tokens (a peer-id takeover without the token gets 409),
   and a storage-reclaim alarm that wipes a room's SQLite rows a minute after it drains.
   Identity travels in the upgrade URL (`/ws?room=&peer=&name=`). In dev/preview the
@@ -137,11 +139,20 @@ only — the data path stays pure P2P.
   the server or any logging layer. Legacy `?k=` links are accepted, then scrubbed and
   migrated into the fragment on landing. Both sides derive an AES-GCM key (SHA-256 of
   `k`) and seal every payload frame.
-- **Key proof & consent** (SEC-01): possession of the key is proven with a sealed
-  nonce ping/pong, not a self-asserted capability flag. Peers that cannot prove it
-  (e.g. iOS Safari on plain `http://192.168.x.x`) receive no chat or file bytes until
-  you answer one blocking consent prompt per peer — payload is withheld, never
-  silently downgraded to DTLS-only.
+- **Key proof & consent, and no silent losses** (SEC-01): possession of the key is
+  proven with a sealed nonce ping/pong, not a self-asserted capability flag. Keyed
+  rooms deliver SEALED frames to every WebCrypto-capable peer, proven or not — a
+  peer that cannot open them renders an explicit "could not decrypt" bubble per
+  message, so nothing ever disappears silently (plaintext still never leaves
+  without proof or consent). Peers with no WebCrypto at all (e.g. iOS Safari on
+  plain `http://192.168.x.x`) stay withheld until you answer one blocking consent
+  prompt per peer. A peer that holds no key at all (the "On your
+  network" list opens the bare room URL) asks once for a share (SEC-11): the room
+  host approves one prompt and the key rides the DTLS-protected channel to it,
+  after which the room is end-to-end for everyone. The host is the longest-tenured
+  member, elected server-side; "keep them out" is host-exclusive and actually
+  removes the joiner (close 4403 + rejoin tombstone). Creators can open key-share
+  approvals to every member with the room-creation toggle.
 - **File transfer** (`src/lib/p2p/protocol.ts`, `src/lib/p2p/spill.ts`): `[1-byte
 type][payload]` wire — JSON control frames interleave with raw binary chunks of the
   single active transfer per connection (the channel is ordered+reliable, so

@@ -82,11 +82,17 @@ export class LanProbe {
             await this.pc.addIceCandidate(cand);
           } catch {}
         }
-        this.settingRemoteAnswer = desc.type === "answer";
-        await this.pc.setLocalDescription();
-        this.settingRemoteAnswer = false;
-        const ld = this.pc.localDescription;
-        if (ld) this.emit({ type: ld.type, sdp: ld.sdp });
+        // answer offers only — a no-arg setLocalDescription() after an ANSWER
+        // is an implicit re-offer and would loop the probe through the relay
+        // until the timeout (same flood shape as the room client had)
+        if (desc.type === "offer") {
+          this.settingRemoteAnswer = false;
+          await this.pc.setLocalDescription();
+          const ld = this.pc.localDescription;
+          if (ld) this.emit({ type: ld.type, sdp: ld.sdp });
+        } else {
+          this.settingRemoteAnswer = false;
+        }
       } else {
         const cand = data as RTCIceCandidateInit;
         if (!this.pc.remoteDescription) {

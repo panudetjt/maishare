@@ -13,6 +13,11 @@ const EMPTY: RoomState = {
   transfers: [],
   toasts: [],
   consents: [],
+  keyRequests: [],
+  selfKey: null,
+  hostId: null,
+  keyShare: "host",
+  kicked: false,
   sentTotal: 0,
   recvTotal: 0,
 };
@@ -20,11 +25,16 @@ const EMPTY: RoomState = {
 const noopSubscribe = () => () => {};
 const emptySnapshot = () => EMPTY;
 
-export function useRoom(roomId: string, key: string | undefined, name: string) {
+export function useRoom(
+  roomId: string,
+  key: string | undefined,
+  name: string,
+  keyShare?: "anyone",
+) {
   const [client, setClient] = useState<RoomClient | null>(null);
 
   useEffect(() => {
-    const c = new RoomClient({ roomId, key, name });
+    const c = new RoomClient({ roomId, key, name, keyShare });
     void c.start();
     setClient(c);
     return () => c.dispose();

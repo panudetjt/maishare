@@ -155,7 +155,7 @@ describe("withholding from unproven peers (SEC-01)", () => {
     expect(last[0]).toBe(FRAME.CONTROL_ENC);
   });
 
-  it("never proves a peer on an unsealed or wrong-nonce pong", async () => {
+  it("never proves a peer on an unsealed or wrong-nonce pong — payloads still sealed", async () => {
     await h.start();
     const peer = h.addPeer(IMPOLITE_PEER);
     const ch = h.openChannel(peer);
@@ -179,9 +179,14 @@ describe("withholding from unproven peers (SEC-01)", () => {
       ),
     );
     await h.flush();
-    h.client.sendChat("still withheld");
+    h.client.sendChat("sealed anyway");
     await h.flush();
-    expect(await payloadCount(ch)).toBe(0);
+    // the unproven peer still receives the ciphertext — an unreadable frame
+    // the far side renders as an explicit bubble, never silence — but NO
+    // plaintext ever leaves without proof or consent
+    expect(await payloadCount(ch)).toBe(1);
+    // the chat left as ciphertext (CONTROL_ENC), never plaintext
+    expect(ch.sent.at(-1)![0]).toBe(FRAME.CONTROL_ENC);
 
     // wrong nonce in a sealed pong proves nothing either
     ch.receive(
@@ -191,12 +196,13 @@ describe("withholding from unproven peers (SEC-01)", () => {
       ),
     );
     await h.flush();
-    h.client.sendChat("still withheld 2");
+    h.client.sendChat("still ciphertext");
     await h.flush();
-    expect(await payloadCount(ch)).toBe(0);
+    expect(await payloadCount(ch)).toBe(2);
+    expect(ch.sent.at(-1)![0]).toBe(FRAME.CONTROL_ENC);
   });
 
-  it("withholds from a keyless-capable joiner with no consent path", async () => {
+  it("sends sealed payloads to a keyless-capable joiner — never silence", async () => {
     await h.start();
     const peer = h.addPeer(IMPOLITE_PEER);
     const ch = h.openChannel(peer);
@@ -205,10 +211,13 @@ describe("withholding from unproven peers (SEC-01)", () => {
     deliverHello(ch, true);
     await h.flush();
 
-    h.client.sendChat("you get nothing");
+    h.client.sendChat("you get ciphertext");
     await h.flush();
-    expect(await payloadCount(ch)).toBe(0);
-    // capable-but-unproven peers draw no consent prompt — withholding only
+    // the joiner receives the SEALED frame and its client renders an explicit
+    // undecryptable bubble — withheld silence is what hid the old receive bug
+    expect(await payloadCount(ch)).toBe(1);
+    expect(ch.sent.at(-1)![0]).toBe(FRAME.CONTROL_ENC);
+    // capable-but-unproven peers draw no consent prompt — nothing is plaintext
     expect(h.client.getSnapshot().consents).toEqual([]);
   });
 
@@ -235,7 +244,7 @@ describe("withholding from unproven peers (SEC-01)", () => {
     expect(controls.find((c) => c.t === "file-start")).toBeDefined();
   });
 
-  it("wrong-key member stays on the undecryptable path, payloads withheld", async () => {
+  it("wrong-key member stays on the undecryptable path — sealed bytes, never plaintext", async () => {
     await h.start();
     const peer = h.addPeer(IMPOLITE_PEER);
     const ch = h.openChannel(peer);
@@ -260,10 +269,13 @@ describe("withholding from unproven peers (SEC-01)", () => {
       true,
     );
 
-    // the wrong-key member receives no payload content at all
+    // the wrong-key member receives the payload as SEALED ciphertext — their
+    // client renders an explicit bubble per message, and nothing readable
+    // ever leaves this side without their proving the key
     h.client.sendChat("not for mallory");
     await h.flush();
-    expect(await payloadCount(ch)).toBe(0);
+    expect(await payloadCount(ch)).toBe(1); // the sealed chat (pings are not payloads)
+    expect(ch.sent.at(-1)![0]).toBe(FRAME.CONTROL_ENC);
     expect(h.client.getSnapshot().consents).toEqual([]);
   });
 

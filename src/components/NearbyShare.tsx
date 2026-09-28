@@ -27,6 +27,11 @@ const IDLE: RoomState = {
   transfers: [],
   toasts: [],
   consents: [],
+  keyRequests: [],
+  selfKey: null,
+  hostId: null,
+  keyShare: "host",
+  kicked: false,
   sentTotal: 0,
   recvTotal: 0,
 };

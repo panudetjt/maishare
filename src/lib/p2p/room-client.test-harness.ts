@@ -73,6 +73,13 @@ export class FakeRTCPeerConnection {
   onnegotiationneeded: (() => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   ondatachannel: ((ev: { channel: FakeDataChannel }) => void) | null = null;
+  /** models the remote-description state machine: an offer is pending an answer */
+  private remoteOfferPending = false;
+  /** how many times a no-arg setLocalDescription() created an IMPLICIT offer —
+   * real browsers do this whenever it is called in stable state, which is what
+   * turns a stray post-answer setLocalDescription() into an endless
+   * offer/answer loop through the signaling relay */
+  implicitOffers = 0;
 
   constructor() {
     FakeRTCPeerConnection.instances.push(this);
@@ -87,14 +94,23 @@ export class FakeRTCPeerConnection {
   }
 
   async setLocalDescription() {
-    this.localDescription ??= {
-      type: this.remoteDescription ? "answer" : "offer",
-      sdp: FAKE_SDP,
-    };
+    if (this.remoteOfferPending) {
+      // answering a remote offer — the one legitimate no-arg call
+      this.localDescription = { type: "answer", sdp: FAKE_SDP };
+      this.remoteOfferPending = false;
+      this.signalingState = "stable";
+      return;
+    }
+    // stable state: implicit re-offer (exactly what real browsers do)
+    this.implicitOffers += 1;
+    this.localDescription = { type: "offer", sdp: FAKE_SDP };
+    this.signalingState = "have-local-offer";
   }
 
   async setRemoteDescription(desc: RTCSessionDescriptionInit) {
     this.remoteDescription = { type: desc.type, sdp: desc.sdp ?? FAKE_SDP };
+    this.remoteOfferPending = desc.type === "offer";
+    this.signalingState = desc.type === "offer" ? "have-remote-offer" : "stable";
   }
 
   async addIceCandidate(cand: RTCIceCandidateInit) {

@@ -9,11 +9,19 @@ export type ServerMsg =
       token?: string;
       peers: { peerId: string; name: string }[];
       addresses: string[];
+      /** SEC-11: the room host (longest-tenured member), server-elected */
+      host?: string;
+      /** SEC-11: who may approve key shares — "host" (default) or "anyone" */
+      ks?: "host" | "anyone";
     }
   | { t: "peer-join"; peerId: string; name: string }
   | { t: "peer-leave"; peerId: string }
   | { t: "peer-name"; peerId: string; name: string }
   | { t: "signal"; from: string; data: unknown }
+  /** SEC-11: the host designation changed (host left, next-oldest takes over) */
+  | { t: "host"; peerId: string | null }
+  // the room host removed this peer; the socket closes right after (4403)
+  | { t: "kicked" }
   // discovery: the DO asks a member to verify a prober over a host-only
   // connection (`from` is the prober's peer id); probers in empty rooms get
   // an immediate dead end
@@ -21,7 +29,11 @@ export type ServerMsg =
   | { t: "probe-empty" }
   | { t: "error"; message: string };
 
-export type ClientMsg = { t: "signal"; to: string; data: unknown } | { t: "name"; name: string };
+export type ClientMsg =
+  | { t: "signal"; to: string; data: unknown }
+  | { t: "name"; name: string }
+  /** host-only (enforced server-side): remove a member from the room */
+  | { t: "kick"; peerId: string };
 
 /**
  * How a RoomClient talks to the outside world to set up its mesh. The default
@@ -52,13 +64,27 @@ export class Signaling implements RoomTransport {
   private closedByUs = false;
   private attempts = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private info: { roomId: string; peerId: string; name: string; probe?: boolean; token?: string };
+  private info: {
+    roomId: string;
+    peerId: string;
+    name: string;
+    probe?: boolean;
+    token?: string;
+    /** SEC-11: creator opt-in — any member may approve key shares */
+    keyShare?: "anyone";
+  };
   private handlers: { onMessage: (m: ServerMsg) => void; onStatus: (s: SignalStatus) => void } = {
     onMessage: () => {},
     onStatus: () => {},
   };
 
-  constructor(info: { roomId: string; peerId: string; name: string; probe?: boolean }) {
+  constructor(info: {
+    roomId: string;
+    peerId: string;
+    name: string;
+    probe?: boolean;
+    keyShare?: "anyone";
+  }) {
     this.info = info;
   }
 
@@ -89,6 +115,7 @@ export class Signaling implements RoomTransport {
         name: this.info.name,
       });
       if (this.info.probe) params.set("probe", "1");
+      if (this.info.keyShare) params.set("ks", this.info.keyShare);
       // the ownership token rides the handshake URL like the room/peer identity
       // it protects — the WebSocket API offers no header channel on browsers.
       // Exposure is bounded: it authorizes only this peer id in this room, and
@@ -112,8 +139,15 @@ export class Signaling implements RoomTransport {
         // ignore malformed frames
       }
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       this.ws = null;
+      // 4403 = the room host removed us (SEC-11) — never retry; the client
+      // surfaces the removal from the kicked message that preceded this
+      if (ev.code === 4403) {
+        this.closedByUs = true;
+        this.handlers.onStatus("offline");
+        return;
+      }
       if (!this.closedByUs) {
         this.handlers.onStatus("offline");
         this.retry();

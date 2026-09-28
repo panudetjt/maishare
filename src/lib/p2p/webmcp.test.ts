@@ -73,6 +73,7 @@ const ROOM_TOOLS = [
   "maishare_send_file_from_url",
   "maishare_set_name",
   "maishare_respond_consent",
+  "maishare_respond_key_request",
   "maishare_cancel_transfer",
   "maishare_clear_history",
 ];
@@ -115,6 +116,7 @@ describe("WebMCP room tools", () => {
       "maishare_send_message",
       "maishare_send_file",
       "maishare_respond_consent",
+      "maishare_respond_key_request",
       "maishare_clear_history",
     ]) {
       expect(by(n).annotations, n).toEqual({ consequentialHint: true });

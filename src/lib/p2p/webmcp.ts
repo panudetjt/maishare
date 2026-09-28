@@ -534,6 +534,27 @@ export function registerRoomTools(
   });
 
   register({
+    name: "maishare_respond_key_request",
+    title: "Answer the key-share request",
+    description:
+      "Answer a keyless joiner's request for the room key (only when this client is empowered by the room's policy): allow = share the key over the encrypted channel, deny = keep them out of the room. Only takes effect when a key-share prompt is showing.",
+    inputSchema: {
+      type: "object",
+      properties: { allow: { type: "boolean" } },
+      required: ["allow"],
+      additionalProperties: false,
+    },
+    annotations: { consequentialHint: true },
+    execute: (input) => {
+      const req = needClient().getSnapshot().keyRequests[0];
+      if (!req) throw new Error("respond_key_request: no pending key-share request");
+      const allow = input.allow === true;
+      needClient().respondKeyRequest(req.peerId, allow);
+      return { answered: true, allow };
+    },
+  });
+
+  register({
     name: "maishare_cancel_transfer",
     title: "Cancel a transfer",
     description: "Cancel an active outgoing transfer, or reject an inbound one, by transfer id.",

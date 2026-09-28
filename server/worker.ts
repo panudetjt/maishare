@@ -51,6 +51,23 @@ const MAX_MEMBERS_PER_ADDRESS = 8;
  * member leaves (the room drained) */
 const TOKEN_GRACE_MS = 60_000;
 
+/** SEC-12: per-connection signaling flood cap. The WS upgrade is rate-limited
+ * per IP at the edge, but messages inside one connection were unbounded —
+ * each one wakes the DO (a billable invocation), so a single cheap socket
+ * could pump millions of requests. A token bucket per socket bounds the
+ * relay: capacity covers the worst legitimate burst (a 16-member join storm
+ * relaying offers/candidates to every peer at once), the refill rate bounds
+ * sustained load, and enough over-budget messages close the socket. */
+const FLOOD_RATE = 40; // tokens refilled per second
+const FLOOD_BURST = 200; // bucket capacity
+const FLOOD_MAX_VIOLATIONS = 50; // over-budget messages before close(4409)
+
+interface FloodState {
+  tokens: number;
+  last: number;
+  violations: number;
+}
+
 /** 1-day supply-chain policy: only versions older than the window resolve */
 interface PeerMeta {
   peerId: string;
@@ -61,13 +78,23 @@ interface PeerMeta {
   probe?: boolean;
   /** SEC-08: ownership token minted at this peer's first admission */
   token?: string;
+  /** admission order (lower = earlier) — elects the room host; survives
+   * reconnects because a replacing socket inherits the incumbent's seq */
+  seq?: number;
 }
 
 /** shape of messages peers send over the signaling channel */
 type SignalMessage =
   | { t: "signal"; to: string; data: unknown }
   | { t: "name"; name: string }
-  | { t: "leave" };
+  | { t: "leave" }
+  // host-only: remove a member from the room (the "keep them out" answer)
+  | { t: "kick"; peerId: string };
+
+/** who may answer a key-share request from a keyless joiner (SEC-11):
+ * "host" (default) gates the decision to the room host, "anyone" restores
+ * the any-member behavior a creator can opt into at room creation */
+type KeySharePolicy = "host" | "anyone";
 
 /** managed Rate Limiting API binding (see "unsafe.bindings" in wrangler.jsonc;
  * the limit window itself is declared in config, not per call) */
@@ -141,6 +168,9 @@ export class Room {
   private readonly state: DurableObjectState;
   private readonly env: Env;
   private roomId = "";
+  /** SEC-12 flood buckets, keyed by socket — instance memory only (an active
+   * flood keeps the DO alive, so the bucket persists through the abuse) */
+  private readonly flood = new Map<WebSocket, FloodState>();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -184,6 +214,30 @@ export class Room {
   private broadcast(obj: unknown, exceptPeerId: string): void {
     for (const { ws, meta } of this.realRoster()) {
       if (meta.peerId !== exceptPeerId) this.send(ws, obj);
+    }
+  }
+
+  /** The room host: the longest-tenured member (lowest admission seq). The
+   * designation is server-authoritative — clients learn it from the welcome
+   * and from host-change broadcasts, never by self-assertion. */
+  private hostPeerId(): string | null {
+    let host: RosterEntry | null = null;
+    for (const e of this.realRoster()) {
+      if (!host || (e.meta.seq ?? Infinity) < (host.meta.seq ?? Infinity)) host = e;
+    }
+    return host?.meta.peerId ?? null;
+  }
+
+  /** Elect/persist the host and tell the room when it changed. `exceptPeerId`
+   * skips the peer that just joined — its welcome already carried the host. */
+  private async electHost(exceptPeerId = ""): Promise<void> {
+    const host = this.hostPeerId();
+    const prev = await this.state.storage.get<string | null>("host");
+    if (host === prev) return;
+    if (host == null) await this.state.storage.put("host", null);
+    else await this.state.storage.put("host", host);
+    for (const { ws, meta } of this.realRoster()) {
+      if (meta.peerId !== exceptPeerId) this.send(ws, { t: "host", peerId: host });
     }
   }
 
@@ -261,6 +315,11 @@ export class Room {
     // Probe joins never touch the token flow (existing early-return below).
     let token: string | undefined;
     if (!probe) {
+      // SEC-11: a session the host removed cannot reclaim its peer id — the
+      // tombstone outlives the socket and dies with the drained room
+      if (await this.state.storage.get(`kicked:${peerId}`)) {
+        return new Response("removed from this room", { status: 410 });
+      }
       const stored = await this.state.storage.get<string>(`token:${peerId}`);
       if (stored == null) {
         token = crypto.randomUUID();
@@ -272,9 +331,25 @@ export class Room {
       }
     }
 
+    // SEC-11 room policy: the CREATOR (first real member) may open key-share
+    // approvals to every member; otherwise the default host-only applies.
+    // Later joins cannot change it — the param is only honored on an empty room.
+    if (!probe && url.searchParams.get("ks") === "anyone" && this.realRoster().length === 0) {
+      await this.state.storage.put("keyShare", "anyone");
+    }
+    const keyShare: KeySharePolicy =
+      (await this.state.storage.get<KeySharePolicy>("keyShare")) ?? "host";
+
     const pair = new WebSocketPair();
     this.state.acceptWebSocket(pair[1]);
-    pair[1].serializeAttachment({ peerId, name, ip, probe, token } satisfies PeerMeta);
+    // admission order lives in storage (survives reconnects and restarts);
+    // the per-peer row is what makes a rejoining member keep host status
+    let seq: number | undefined;
+    if (!probe) {
+      seq = (await this.state.storage.get<number>(`seq:${peerId}`)) ?? (await this.nextSeq());
+      await this.state.storage.put(`seq:${peerId}`, seq);
+    }
+    pair[1].serializeAttachment({ peerId, name, ip, probe, token, seq } satisfies PeerMeta);
 
     if (probe) {
       // discovery verification: a room member opens a host-only WebRTC
@@ -300,6 +375,8 @@ export class Room {
       t: "welcome",
       you: peerId,
       token,
+      host: this.hostPeerId() ?? undefined,
+      ks: keyShare,
       peers: this.realRoster()
         .map((e) => e.meta)
         .filter((m) => m.peerId !== peerId)
@@ -309,6 +386,7 @@ export class Room {
     });
 
     this.broadcast({ t: "peer-join", peerId, name }, peerId);
+    await this.electHost(peerId);
 
     await this.announceLobby();
     await this.scheduleHeartbeat();
@@ -316,8 +394,45 @@ export class Room {
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
+  /** admission counter — the room host is the lowest seq (SEC-11) */
+  private async nextSeq(): Promise<number> {
+    const next = ((await this.state.storage.get<number>("seq")) ?? 0) + 1;
+    await this.state.storage.put("seq", next);
+    return next;
+  }
+
+  /** SEC-12: refill-and-consume one signaling message slot for this socket.
+   * A full bucket clears past violations, so a one-off legitimate burst never
+   * accumulates toward the close threshold. */
+  private allowSignaling(ws: WebSocket): boolean {
+    let st = this.flood.get(ws);
+    if (!st) {
+      st = { tokens: FLOOD_BURST, last: Date.now(), violations: 0 };
+      this.flood.set(ws, st);
+    }
+    const now = Date.now();
+    st.tokens = Math.min(FLOOD_BURST, st.tokens + ((now - st.last) / 1000) * FLOOD_RATE);
+    st.last = now;
+    if (st.tokens >= FLOOD_BURST) st.violations = 0;
+    if (st.tokens >= 1) {
+      st.tokens -= 1;
+      return true;
+    }
+    st.violations += 1;
+    return st.violations <= FLOOD_MAX_VIOLATIONS;
+  }
+
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string" || message.length > 300_000) return;
+    // the flood check runs before any parsing so abuse costs the least work
+    if (!this.allowSignaling(ws)) {
+      try {
+        ws.close(4409, "flood");
+      } catch {
+        /* already closing */
+      }
+      return;
+    }
     const msg = parseSignal(message);
     if (!msg) return;
     let meta: PeerMeta;
@@ -355,6 +470,22 @@ export class Room {
       } catch {
         /* already closing */
       }
+    } else if (msg.t === "kick") {
+      // SEC-11: only the room host may remove a member ("keep them out").
+      // The check is server-side — a non-host client sending kick is a no-op.
+      if (meta.peerId !== this.hostPeerId()) return;
+      const target = this.realRoster().find((e) => e.meta.peerId === msg.peerId);
+      if (!target || target.meta.peerId === meta.peerId) return;
+      // the tombstone blocks the removed session from reclaiming its peer id
+      // until the room drains; a brand-new session (fresh id) can still join —
+      // the room key remains the real capability
+      await this.state.storage.put(`kicked:${target.meta.peerId}`, Date.now());
+      this.send(target.ws, { t: "kicked" });
+      try {
+        target.ws.close(4403, "kicked");
+      } catch {
+        /* already closing */
+      }
     }
   }
 
@@ -365,15 +496,28 @@ export class Room {
     } catch {
       return;
     }
-    if (!meta?.peerId || meta.probe) return;
+    if (!meta?.peerId) return;
+    if (meta.probe) {
+      // a prober hitting an EMPTY room leaves no member behind to arm the
+      // drain alarm — arm it here, or the admission's roomId row lingers in
+      // SQLite forever (and any room id can spawn one via a probe request)
+      if (!this.realRoster().length) await this.scheduleDrain();
+      return;
+    }
+    this.flood.delete(ws);
     this.broadcast({ t: "peer-leave", peerId: meta.peerId }, meta.peerId);
+    // the host may have left — re-elect and tell the room (SEC-11)
+    await this.electHost();
     await this.announceLobby();
     // room drained: forget ownership tokens once the grace period passes
-    if (!this.realRoster().length) {
-      const next = Date.now() + TOKEN_GRACE_MS;
-      const current = await this.state.storage.getAlarm();
-      if (current == null || current > next) await this.state.storage.setAlarm(next);
-    }
+    if (!this.realRoster().length) await this.scheduleDrain();
+  }
+
+  /** reclaim the room's storage TOKEN_GRACE_MS after the roster empties */
+  private async scheduleDrain(): Promise<void> {
+    const next = Date.now() + TOKEN_GRACE_MS;
+    const current = await this.state.storage.getAlarm();
+    if (current == null || current > next) await this.state.storage.setAlarm(next);
   }
 
   async webSocketError(_ws: WebSocket): Promise<void> {

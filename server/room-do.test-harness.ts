@@ -140,11 +140,14 @@ export function joinRequest(opts: {
   ip?: string | null;
   probe?: boolean;
   token?: string;
+  /** SEC-11: creator opt-in for the key-share policy */
+  ks?: "anyone";
 }): Request {
   const params = new URLSearchParams({ room: opts.roomId ?? "test-room", peer: opts.peerId });
   if (opts.name) params.set("name", opts.name);
   if (opts.probe) params.set("probe", "1");
   if (opts.token) params.set("token", opts.token);
+  if (opts.ks) params.set("ks", opts.ks);
   const headers = new Headers({ Upgrade: "websocket" });
   if (opts.ip !== null) headers.set("CF-Connecting-IP", opts.ip ?? "203.0.113.10");
   return new Request(`https://room.local/ws?${params.toString()}`, { headers });

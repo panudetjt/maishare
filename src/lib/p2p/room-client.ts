@@ -134,6 +134,18 @@ export interface RoomState {
   toasts: Toast[];
   /** unproven peers awaiting the sender's explicit plaintext-consent decision */
   consents: ConsentRequest[];
+  /** keyless peers awaiting the key-share approval decision */
+  keyRequests: ConsentRequest[];
+  /** the room key this client acquired at runtime via key-offer (null when
+   * it joined holding the invite key or the room has none) — lets the page
+   * repair its invite URL and recents after a LAN-list join */
+  selfKey: string | null;
+  /** SEC-11: server-elected room host (null = no server announcement) */
+  hostId: string | null;
+  /** SEC-11: who may approve key shares — "host" default, "anyone" opt-in */
+  keyShare: "host" | "anyone";
+  /** the room host removed this client from the room */
+  kicked: boolean;
   sentTotal: number;
   recvTotal: number;
 }
@@ -199,6 +211,10 @@ interface PeerCtx {
   lastDoneAt: number | null;
   /** one unreadable-frame warning per connection — no toast storms */
   undecryptableWarned: boolean;
+  /** we asked this peer to share the room key (once per connection) */
+  keyRequested: boolean;
+  /** the user answered the key-share prompt for this peer (either way) */
+  keyShareDecided: boolean;
 }
 
 function rid(): string {
@@ -238,6 +254,9 @@ export class RoomClient {
   readonly selfId = rid();
   private selfName: string;
   private cipher: RoomCipher | null = null;
+  /** the raw key bytes behind `cipher` — needed to answer key-offer requests;
+   * lives only in this tab's memory (never sent to the server) */
+  private roomKey: string | null = null;
   private readonly cipherReady: Promise<void>;
   /** WS signaling by default; Nearby swaps in a DirectTransport */
   private readonly sig: RoomTransport;
@@ -259,11 +278,20 @@ export class RoomClient {
   private transfers: TransferView[] = [];
   private toasts: Toast[] = [];
   private consents: ConsentRequest[] = [];
+  private keyRequests: ConsentRequest[] = [];
   private sentTotal = 0;
   private recvTotal = 0;
   private addresses: string[] = [];
   private signalStatus: SignalStatus = "connecting";
   private hadSession = false;
+  /** SEC-11: server-elected room host (null when the server predates it or
+   * there is no server — Nearby); null falls back to the any-member policy */
+  private hostId: string | null = null;
+  /** SEC-11: who may approve key shares — "host" by default, "anyone" when
+   * the room was created with the opt-in (or no server announced a policy) */
+  private keyShare: "host" | "anyone" = "host";
+  /** the host removed us from the room — surfaces in the UI, never reconnects */
+  private kicked = false;
   private started = false;
   private disposed = false;
   private toastSeq = 1;
@@ -284,12 +312,16 @@ export class RoomClient {
     iceServers?: RTCIceServer[];
     /** fixed perfect-negotiation role for single-peer direct sessions */
     initiator?: boolean;
+    /** SEC-11: creator opt-in — any member may approve key shares (travels to
+     * the DO, which honors it only from the room's first member) */
+    keyShare?: "anyone";
   }) {
     this.roomId = opts.roomId;
     this.selfName = opts.name;
     this.gatherSdp = opts.gatherSdp ?? false;
     this.iceServers = opts.iceServers ?? ICE_SERVERS;
     this.initiatorOverride = opts.initiator;
+    if (opts.key) this.roomKey = opts.key;
     this.cipherReady = opts.key
       ? RoomCipher.fromKey(opts.key).then(
           (c) => {
@@ -303,6 +335,7 @@ export class RoomClient {
       roomId: opts.roomId,
       peerId: this.selfId,
       name: opts.name,
+      keyShare: opts.keyShare,
     });
     this.sig = opts.transport ?? signaling;
     this.sig.bind({
@@ -354,6 +387,11 @@ export class RoomClient {
       transfers: this.transfers.map((t) => ({ ...t })),
       toasts: this.toasts,
       consents: this.consents,
+      keyRequests: this.keyRequests,
+      selfKey: this.roomKey,
+      hostId: this.hostId,
+      keyShare: this.keyShare,
+      kicked: this.kicked,
       sentTotal: this.sentTotal,
       recvTotal: this.recvTotal,
     };
@@ -379,7 +417,13 @@ export class RoomClient {
     if (!n || n === this.selfName) return;
     this.selfName = n;
     this.sig.updateName(n);
-    this.broadcastControl({ t: "hello", name: n, platform: platformLabel(), e2e: hasCrypto() });
+    this.broadcastControl({
+      t: "hello",
+      name: n,
+      platform: platformLabel(),
+      e2e: hasCrypto(),
+      keyed: this.cipher != null,
+    });
     this.schedule();
   }
 
@@ -578,6 +622,33 @@ export class RoomClient {
     this.schedule();
   }
 
+  /** the user's answer to a key-share request: allow sends the room key over
+   * the DTLS-protected data channel so the joiner can prove possession and
+   * take part end-to-end; deny ("keep them out") ALSO removes the joiner
+   * from the room via a host-authoritative server kick — no key, no seat */
+  respondKeyRequest(peerId: string, allow: boolean) {
+    if (!this.keyRequests.some((q) => q.peerId === peerId)) return;
+    this.keyRequests = this.keyRequests.filter((q) => q.peerId !== peerId);
+    const ctx = this.peers.get(peerId);
+    if (ctx) {
+      ctx.keyShareDecided = true;
+      if (allow && this.roomKey) {
+        void this.sendControl(ctx, { t: "key-offer", k: this.roomKey }, "plain");
+      } else if (!allow) {
+        // the server enforces host authority; the client only makes the ask
+        this.sig.send({ t: "kick", peerId });
+      }
+    }
+    this.schedule();
+  }
+
+  /** hide a key-share prompt without deciding it (a non-host's "not now" —
+   * the empowered member still sees and answers the request) */
+  dismissKeyRequest(peerId: string) {
+    this.keyRequests = this.keyRequests.filter((q) => q.peerId !== peerId);
+    this.schedule();
+  }
+
   toast(msg: string, kind: Toast["kind"] = "info") {
     const t: Toast = { id: this.toastSeq++, msg, kind };
     this.toasts = [...this.toasts, t];
@@ -613,6 +684,7 @@ export class RoomClient {
         this.peers.clear();
         // prompts for old connections are stale — fresh peers re-request
         this.consents = [];
+        this.keyRequests = [];
       }
       this.hadSession = true;
     }
@@ -623,11 +695,31 @@ export class RoomClient {
     switch (m.t) {
       case "welcome":
         this.addresses = m.addresses;
+        // SEC-11: the server elects the host and owns the key-share policy
+        this.hostId = m.host ?? this.hostId;
+        this.keyShare = m.ks ?? this.keyShare;
         // SEC-08: remember the ownership token and re-present it on every
         // retry/reconnect, so a dropped socket reclaims its own slot
         if (m.token) this.sig.setToken?.(m.token);
         // SEC-05: roster entries beyond the cap stay inert — no allocation
         for (const p of m.peers) this.ensurePeer(p.peerId, p.name);
+        this.schedule();
+        break;
+      case "host":
+        // SEC-11: re-election broadcast (the host left; next-oldest takes over)
+        this.hostId = m.peerId;
+        this.schedule();
+        break;
+      case "kicked":
+        // SEC-11: the host removed us — tear the mesh down and surface it;
+        // the signaling socket closes (4403) right after and must not retry
+        this.kicked = true;
+        for (const p of this.peers.values()) this.teardownPeer(p);
+        this.peers.clear();
+        this.consents = [];
+        this.keyRequests = [];
+        this.sig.close();
+        this.toast("You were removed from the room by the host", "error");
         this.schedule();
         break;
       case "peer-join": {
@@ -735,6 +827,8 @@ export class RoomClient {
       createdAt: performance.now(),
       lastDoneAt: null,
       undecryptableWarned: false,
+      keyRequested: false,
+      keyShareDecided: false,
     };
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) this.sig.send({ t: "signal", to: peerId, data: candidate.toJSON() });
@@ -802,12 +896,19 @@ export class RoomClient {
             await ctx.pc.addIceCandidate(cand);
           } catch {}
         }
-        ctx.settingRemoteAnswer = desc.type === "answer";
-        await ctx.pc.setLocalDescription();
-        if (this.gatherSdp) await gathered(ctx.pc);
-        ctx.settingRemoteAnswer = false;
-        const ld = ctx.pc.localDescription;
-        if (ld) this.sig.send({ t: "signal", to: peerId, data: { type: ld.type, sdp: ld.sdp } });
+        // only an OFFER gets an answer. Responding to an ANSWER would call
+        // setLocalDescription() in stable state — which every browser reads
+        // as an implicit NEW offer — looping offer/answer through the relay
+        // forever (the dominant measured DO flood, ~22 req/s for one pair).
+        if (desc.type === "offer") {
+          ctx.settingRemoteAnswer = false;
+          await ctx.pc.setLocalDescription();
+          if (this.gatherSdp) await gathered(ctx.pc);
+          const ld = ctx.pc.localDescription;
+          if (ld) this.sig.send({ t: "signal", to: peerId, data: { type: ld.type, sdp: ld.sdp } });
+        } else {
+          ctx.settingRemoteAnswer = false;
+        }
       } else {
         const cand = data as RTCIceCandidateInit;
         if (!ctx.pc.remoteDescription) {
@@ -847,6 +948,7 @@ export class RoomClient {
         name: this.selfName,
         platform: platformLabel(),
         e2e: hasCrypto(),
+        keyed: this.cipher != null,
       });
       // keyed rooms release deferred traffic only to deliverable peers; with
       // no key everyone is deliverable
@@ -891,9 +993,14 @@ export class RoomClient {
     return performance.now() - inc.lastProgress > INCOMING_STALE_MS;
   }
 
-  /** may payload frames (chat, file-start, chunks) be delivered to this peer? */
+  /** may payload frames (chat, file-start, chunks) be delivered to this peer?
+   * Keyed rooms deliver SEALED frames to every WebCrypto-capable peer — proven
+   * or not — so an unreadable message always shows up as an explicit
+   * undecryptable bubble on the far side instead of silently vanishing
+   * (ciphertext to a non-key-holder leaks nothing). Only peers with no
+   * WebCrypto at all stay fully withheld until the user consents. */
   private deliverable(ctx: PeerCtx): boolean {
-    return !this.cipher || ctx.proven || ctx.consented;
+    return !this.cipher || ctx.consented || ctx.e2e;
   }
 
   /** SEC-05: evict phantom peer contexts — still 'connecting' past
@@ -915,9 +1022,11 @@ export class RoomClient {
   }
 
   /** prove room-key possession: seal a nonce into a ping — only a key holder
-   * can return the sealed pong echoing it (SEC-01) */
+   * can return the sealed pong echoing it (SEC-01). Re-invoked on every hello
+   * so a peer that just acquired the key (key-offer path) gets a fresh
+   * challenge its old sealed self could never answer. */
   private challenge(ctx: PeerCtx) {
-    if (!this.cipher || ctx.proofNonce != null) return;
+    if (!this.cipher) return;
     const nonce = rid();
     ctx.proofNonce = nonce;
     void (async () => {
@@ -939,6 +1048,30 @@ export class RoomClient {
     if (ctx.consented || ctx.consentDenied) return;
     if (this.consents.some((q) => q.peerId === ctx.peerId)) return;
     this.consents = [...this.consents, { peerId: ctx.peerId, name: ctx.name }];
+    this.schedule();
+  }
+
+  /** adopt a room key received via key-offer: rebuild the cipher, clear the
+   * transient undecryptable warnings the handshake produced, and re-hello so
+   * every member re-challenges us — while challenging them back, since proof
+   * is directional and our old keyless self never demanded theirs. From there
+   * the normal proof flow unseals the room both ways. */
+  private async acquireKey(k: string) {
+    this.roomKey = k;
+    this.cipher = await RoomCipher.fromKey(k);
+    this.chats = this.chats.filter((c) => !c.system);
+    this.broadcastControl({
+      t: "hello",
+      name: this.selfName,
+      platform: platformLabel(),
+      e2e: hasCrypto(),
+      keyed: true,
+    });
+    for (const p of this.peers.values()) {
+      p.undecryptableWarned = false;
+      if (p.e2e && p.dc?.readyState === "open") this.challenge(p);
+    }
+    this.toast("Room key received — this connection is now end-to-end encrypted", "success");
     this.schedule();
   }
 
@@ -994,9 +1127,12 @@ export class RoomClient {
     const dc = ctx.dc;
     if (!dc || dc.readyState !== "open") return;
     const json = encoder.encode(JSON.stringify(c));
+    // sealed whenever we hold a key and the peer hasn't been explicitly
+    // downgraded — including unproven peers, whose unreadable copies surface
+    // as undecryptable bubbles on their side (never silence)
     const wantSeal =
       mode === "proof" ||
-      (mode === "auto" && RoomClient.PAYLOAD_CONTROLS.has(c.t) && this.cipher && ctx.proven);
+      (mode === "auto" && RoomClient.PAYLOAD_CONTROLS.has(c.t) && this.cipher && !ctx.consented);
     const frame =
       wantSeal && this.cipher
         ? await this.cipher.seal(FRAME.CONTROL_ENC, json)
@@ -1013,32 +1149,42 @@ export class RoomClient {
   }
 
   /** a frame arrived that we cannot read — tell the user on BOTH sides and
-   * never stay silent (this is how the iOS receive bug hid for so long) */
-  private notifyUndecryptable(ctx: PeerCtx, detail: "sealed" | "malformed" | "orphan") {
-    // sealed frames arrive one per message (the key-proof challenge re-seals
-    // on every hello), but chunks flood — one warning per connection keeps
-    // the timeline readable
-    if (ctx.undecryptableWarned) return;
-    ctx.undecryptableWarned = true;
+   * never stay silent (this is how the iOS receive bug hid for so long).
+   * Message frames (chat/file-start) get a bubble EACH — a missing bubble
+   * would mean a message silently vanishing — while file-chunks (which fail
+   * in floods) and the toast/back-channel stay throttled to once per
+   * connection. */
+  private notifyUndecryptable(
+    ctx: PeerCtx,
+    detail: "sealed" | "malformed" | "orphan",
+    kind: "frame" | "chunk" = "frame",
+  ) {
     const text =
       detail === "sealed"
         ? "⚠︎ Could not decrypt this message — the sender's app may be outdated or the room key differs."
         : detail === "malformed"
           ? "⚠︎ Received a malformed message that could not be read."
           : "⚠︎ Received file data without its transfer header — ask the sender to resend.";
-    this.chats = [
-      ...this.chats,
-      {
-        id: rid(),
-        peerId: ctx.peerId,
-        name: ctx.name,
-        text,
-        at: Date.now(),
-        mine: false,
-        system: true,
-      },
-    ];
-    this.capChats();
+    if (kind === "frame" || !ctx.undecryptableWarned) {
+      this.chats = [
+        ...this.chats,
+        {
+          id: rid(),
+          peerId: ctx.peerId,
+          name: ctx.name,
+          text,
+          at: Date.now(),
+          mine: false,
+          system: true,
+        },
+      ];
+      this.capChats();
+    }
+    if (ctx.undecryptableWarned) {
+      this.schedule();
+      return;
+    }
+    ctx.undecryptableWarned = true;
     this.toast("A message could not be decrypted — see the warning in the timeline", "error");
     // back-channel is always plain so the sender can parse it regardless of keys
     const dc = ctx.dc;
@@ -1088,9 +1234,9 @@ export class RoomClient {
         if (this.cipher)
           this.cipher.open(body).then(
             (pt) => this.onChunk(ctx, pt),
-            () => this.notifyUndecryptable(ctx, "sealed"),
+            () => this.notifyUndecryptable(ctx, "sealed", "chunk"),
           );
-        else this.notifyUndecryptable(ctx, "sealed");
+        else this.notifyUndecryptable(ctx, "sealed", "chunk");
         break;
     }
   }
@@ -1116,12 +1262,45 @@ export class RoomClient {
             // cannot ever prove (no crypto.subtle) — the consent gate decides
             this.requestConsent(ctx);
           }
+        } else if (c.keyed === true && !ctx.keyRequested) {
+          // we hold no key but a keyed peer appeared — ask for a share, but
+          // only where the room policy allows the ask (SEC-11: the host by
+          // default; anyone when the room opted in; no announcement = anyone)
+          if (this.keyShare === "anyone" || this.hostId == null || ctx.peerId === this.hostId) {
+            ctx.keyRequested = true;
+            void this.sendControl(ctx, { t: "key-request" }, "plain");
+            this.toast("Asked the room for its key — waiting for approval", "info");
+          }
         }
         // release anything that was waiting for exactly this (flushing twice
         // is a no-op; gated to proven/consented peers in keyed rooms)
         this.flushForPeer(ctx);
         this.schedule();
         break;
+      case "key-request": {
+        // a keyless joiner wants in — one approval gate per connection,
+        // only answerable while we actually hold the key
+        if (
+          this.cipher &&
+          !ctx.keyShareDecided &&
+          !this.keyRequests.some((q) => q.peerId === ctx.peerId) &&
+          // SEC-11: the prompt goes to the room the policy empowers — the
+          // host by default, everyone when the room opted in
+          (this.keyShare === "anyone" || this.hostId == null || this.selfId === this.hostId)
+        ) {
+          this.keyRequests = [...this.keyRequests, { peerId: ctx.peerId, name: ctx.name }];
+          this.schedule();
+        }
+        break;
+      }
+      case "key-offer": {
+        // keyless joiner receives the room key over the DTLS channel — build
+        // the cipher, re-hello so members re-challenge, then payloads seal
+        const k = typeof c.k === "string" ? c.k : "";
+        if (this.cipher || k.length < 8 || k.length > 200) break;
+        void this.acquireKey(k);
+        break;
+      }
       case "chat":
         // SEC-03: inbound text is stored truncated to the composer's outbound
         // limit and the retained timeline rolls — a peer streaming maximal
@@ -1393,9 +1572,11 @@ export class RoomClient {
     // mime (not the browser's extension guess) is what goes on the wire
     await this.sniffTransfer(view, file);
     view.status = "active";
-    // chunks are sealed only for peers that proved key possession (consented
-    // peers take plaintext — the user's explicit downgrade)
-    const seal = this.cipher !== null && ctx.proven;
+    // chunks are sealed whenever we hold a key and the peer hasn't been
+    // explicitly downgraded (consented peers take plaintext) — unproven
+    // capable peers receive sealed chunks they cannot open, keeping the
+    // transfer's failure explicit on their side instead of silent
+    const seal = this.cipher !== null && !ctx.consented;
     const chunkSize = Math.max(4096, ctx.maxChunk - (seal ? ENC_OVERHEAD : 1));
     await this.sendControl(ctx, {
       t: "file-start",

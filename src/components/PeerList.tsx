@@ -14,6 +14,7 @@ function dotClass(status: PeerView["status"]): string {
 
 export function PeerList({ state }: { state: RoomState }) {
   const open = state.peers.filter((p) => p.status === "open").length;
+  const isHost = (peerId: string) => state.hostId != null && peerId === state.hostId;
   return (
     <aside className="peers panel">
       <div className="peers-head">
@@ -27,6 +28,7 @@ export function PeerList({ state }: { state: RoomState }) {
           <span className="peer-info">
             <span className="peer-name">
               {state.selfName} <em className="you-tag">you</em>
+              {isHost(state.selfId) ? <em className="host-tag">host</em> : null}
             </span>
             <span className="peer-meta">
               {state.encrypted ? "end-to-end encrypted" : "dtls encrypted"}
@@ -38,7 +40,10 @@ export function PeerList({ state }: { state: RoomState }) {
           <li key={p.peerId} className="peer">
             <span className="avatar">{initial(p.name)}</span>
             <span className="peer-info">
-              <span className="peer-name">{p.name}</span>
+              <span className="peer-name">
+                {p.name}
+                {isHost(p.peerId) ? <em className="host-tag">host</em> : null}
+              </span>
               <span className="peer-meta">
                 {p.status === "open" ? p.platform || "connected" : statusLabel(p.status)}
                 {p.rtt != null && p.status === "open" ? ` · ${p.rtt} ms` : ""}

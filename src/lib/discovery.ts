@@ -2,6 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { LanProbe } from "./p2p/lan-probe";
 import { Signaling } from "./p2p/signaling";
 import { uuid } from "./device";
+import {
+  freshProbeState,
+  mayProbe,
+  onProbeResult,
+  roomIdentity,
+  syncProbeIdentity,
+  type ProbeBackoffState,
+} from "./lan-probe-backoff";
 
 export interface LanRoom {
   roomId: string;
@@ -14,8 +22,6 @@ export interface LanRoom {
 
 export type DiscoveryStatus = "loading" | "live" | "offline";
 
-/** how long a successful LAN verification is trusted before re-probing */
-const VERIFY_TTL = 60_000;
 /** concurrent host-only probes a single home page will run */
 const MAX_PROBES = 3;
 
@@ -81,6 +87,10 @@ export function useLanRooms(pollMs = 5000): { rooms: LanRoom[]; status: Discover
   const [status, setStatus] = useState<DiscoveryStatus>("loading");
   const inFlight = useRef(new Set<string>());
   const verifiedAt = useRef(new Map<string, number>());
+  /** per-room probe backoff (see lan-probe-backoff.ts) — a failing room is
+   * re-probed on a ladder instead of every tick, then goes dormant until its
+   * roster changes; without this a single stale tab floods the signaling DO */
+  const probeState = useRef(new Map<string, ProbeBackoffState>());
   const candidates = useRef<LanRoom[]>([]);
   const alive = useRef(true);
 
@@ -110,14 +120,30 @@ export function useLanRooms(pollMs = 5000): { rooms: LanRoom[]; status: Discover
       for (const c of candidates.current) {
         if (inFlight.current.size >= MAX_PROBES) break;
         if (inFlight.current.has(c.roomId)) continue;
-        if (now - (verifiedAt.current.get(c.roomId) ?? 0) < VERIFY_TTL) continue;
+        const identity = roomIdentity(c.people, c.names);
+        let st = probeState.current.get(c.roomId);
+        if (!st) {
+          st = freshProbeState(identity);
+          probeState.current.set(c.roomId, st);
+        } else {
+          probeState.current.set(c.roomId, syncProbeIdentity(st, identity));
+          st = probeState.current.get(c.roomId)!;
+        }
+        if (!mayProbe(st, verifiedAt.current.get(c.roomId) ?? 0, now)) continue;
         inFlight.current.add(c.roomId);
         void verifyRoom(c.roomId).then((ok) => {
           inFlight.current.delete(c.roomId);
+          const cur = probeState.current.get(c.roomId);
+          if (cur) onProbeResult(cur, ok, Date.now());
           if (ok) verifiedAt.current.set(c.roomId, Date.now());
           else verifiedAt.current.delete(c.roomId);
           publish();
         });
+      }
+      // rooms that left the discovery list take their backoff state with them
+      const advertised = new Set(candidates.current.map((c) => c.roomId));
+      for (const roomId of probeState.current.keys()) {
+        if (!advertised.has(roomId)) probeState.current.delete(roomId);
       }
       publish();
     };
