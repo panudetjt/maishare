@@ -65,6 +65,7 @@ Confirmed findings and the decided remediations. Severity reflects the audit's d
 - The file-start handler validates claims before building state: size must be a safe non-negative integer under a hard ceiling; name and mime are clamped in length.
 - The chunk path aborts on excess: clear the incoming context, mark the transfer errored, send file-cancel back with a size-mismatch reason, and surface one toast. The byte counter must reflect received bytes (never rewritten to the claim at file-end).
 - Honest senders stream exactly the announced size before file-end, so this breaks no legitimate transfer (verified against the real send path during the audit).
+- Ceiling today is MAX_STREAMABLE_SIZE (2^45, sane-integer bound) with received bytes spilled to a sink chosen by announced size: RAM up to RAM_BUFFER_LIMIT (64 MiB), OPFS disk beyond it. The physical bound on disk-bound transfers is browser storage quota — a write failure settles that transfer as an error (file-cancel reason "sink-failed") instead of buffering into oblivion; a disk-bound header on a browser without OPFS is refused up front with reason "too-large".
 
 ### SEC-03 (medium) — Chat timeline grows without per-frame or aggregate caps
 

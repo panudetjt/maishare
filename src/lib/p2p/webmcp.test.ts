@@ -4,7 +4,7 @@
 // the UI uses (wire frames, queue-until-join, size validation included).
 // Home tools cover room creation, recents and the nearby share handshake
 // (share codes as plain strings instead of QR).
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { concatFrame, encoder, FRAME, type Control } from "./protocol";
 import { unpackShareCode } from "./share-code";
 import {
@@ -70,6 +70,7 @@ const ROOM_TOOLS = [
   "maishare_read_file",
   "maishare_send_message",
   "maishare_send_file",
+  "maishare_send_file_from_url",
   "maishare_set_name",
   "maishare_respond_consent",
   "maishare_cancel_transfer",
@@ -322,6 +323,64 @@ describe("WebMCP room tools", () => {
     };
     expect(res.connected).toBe(false);
     expect(res.reason).toBe("timeout");
+  });
+
+  it("send_file_from_url fetches bytes itself — no base64 on the wire", async () => {
+    const mc = new FakeModelContext();
+    registerRoomTools(() => h.client, mc);
+    await h.start();
+    const peer = h.addPeer(IMPOLITE_PEER);
+    const ch = h.openChannel(peer);
+    await h.settle();
+
+    // protocol and URL guards
+    await expect(mc.execute("maishare_send_file_from_url", { url: "ftp://x/y" })).rejects.toThrow(
+      /http/,
+    );
+    await expect(mc.execute("maishare_send_file_from_url", { url: "not a url" })).rejects.toThrow(
+      /absolute/,
+    );
+
+    // happy path: the page fetches and the file enters the normal pipeline
+    const payload = new Uint8Array([9, 8, 7, 6]);
+    const fetchCalls: string[] = [];
+    vi.stubGlobal("fetch", async (u: string) => {
+      fetchCalls.push(u);
+      return new Response(payload, { status: 200, headers: { "content-type": "video/mp4" } });
+    });
+    try {
+      const res = (await mc.execute("maishare_send_file_from_url", {
+        url: "http://127.0.0.1:8787/clip.mp4",
+      })) as { sent: boolean; queuedBytes: number; transfer: { id: string } | null };
+      expect(res.sent).toBe(true);
+      expect(res.queuedBytes).toBe(4);
+      expect(fetchCalls).toEqual(["http://127.0.0.1:8787/clip.mp4"]);
+      await h.settle();
+      const start = outboundControls(ch).find((c) => c.t === "file-start");
+      expect(start).toMatchObject({
+        t: "file-start",
+        name: "clip.mp4",
+        size: 4,
+        mime: "video/mp4",
+      });
+      const wireBytes = ch.sent
+        .filter((f) => f[0] === FRAME.CHUNK)
+        .reduce((n, f) => n + f.byteLength - 1, 0);
+      expect(wireBytes).toBe(4);
+      expect(res.transfer?.id).toBe(start?.id);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    // source errors surface instead of queueing nothing
+    vi.stubGlobal("fetch", async () => new Response("nope", { status: 404 }));
+    try {
+      await expect(
+        mc.execute("maishare_send_file_from_url", { url: "http://127.0.0.1:1/x" }),
+      ).rejects.toThrow(/404/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("send_file validates the chunk protocol", async () => {

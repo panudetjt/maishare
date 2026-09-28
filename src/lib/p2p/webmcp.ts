@@ -12,7 +12,8 @@
 import { loadRecents } from "../recents";
 import { loadName, makeRoomCode, makeRoomKey } from "../device";
 import { DirectTransport } from "./direct";
-import { MAX_TRANSFER_SIZE, RoomClient } from "./room-client";
+import { RoomClient } from "./room-client";
+import { MAX_STREAMABLE_SIZE } from "./spill";
 
 /** the draft's imperative surface, kept local so the spec can move without
  * dragging a dependency behind it; Chrome ships it behind an origin trial */
@@ -366,8 +367,8 @@ export function registerRoomTools(
       const seq = typeof input.seq === "number" ? input.seq : -1;
       const data = typeof input.dataBase64 === "string" ? input.dataBase64 : "";
       if (!name) throw new Error("send_file: name is required");
-      if (!Number.isSafeInteger(size) || size < 0 || size > MAX_TRANSFER_SIZE) {
-        throw new Error(`send_file: size must be a safe integer in 0..${MAX_TRANSFER_SIZE}`);
+      if (!Number.isSafeInteger(size) || size < 0 || size > MAX_STREAMABLE_SIZE) {
+        throw new Error(`send_file: size must be a safe integer in 0..${MAX_STREAMABLE_SIZE}`);
       }
       const key = `${name}:${size}`;
       let up = uploads.get(key);
@@ -404,6 +405,90 @@ export function registerRoomTools(
         openPeerCount: openPeerCount(getClient()!),
         // hand the agent a poll handle: the transfer id it can watch with
         // maishare_wait_transfer (wire ids stay internal otherwise)
+        transfer: view ? { id: view.id, status: view.status } : null,
+      };
+    },
+  });
+
+  register({
+    name: "maishare_send_file_from_url",
+    title: "Send file from URL",
+    description:
+      "Send a file by URL instead of uploading base64 chunks: the page fetches the bytes itself and pushes them through the normal transfer pipeline — zero base64 overhead, the right path for large files. Meant for agent runtimes that can serve the file locally (e.g. http://127.0.0.1:…/clip.mp4). The page must be able to fetch it: CORS must allow this origin, and plain-http URLs only work from a plain-http page or for localhost.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "source URL the page should fetch" },
+        name: {
+          type: "string",
+          description: "file name shown to peers, default = last URL segment",
+        },
+        mime: { type: "string", description: "optional mime type override" },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+    annotations: { consequentialHint: true },
+    execute: async (input) => {
+      const raw = typeof input.url === "string" ? input.url.trim() : "";
+      if (!raw) throw new Error("send_file_from_url: url is required");
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        throw new Error("send_file_from_url: url must be absolute");
+      }
+      if (url.protocol !== "http:" && url.protocol !== "https:") {
+        throw new Error("send_file_from_url: only http(s) URLs are supported");
+      }
+      // a secure page may never pull insecure remote content; localhost is
+      // the agent-runtime carve-out browsers grant for exactly this shape
+      if (
+        typeof location !== "undefined" &&
+        location.protocol === "https:" &&
+        url.protocol === "http:"
+      ) {
+        const host = url.hostname;
+        const isLocal =
+          host === "localhost" ||
+          host === "127.0.0.1" ||
+          host === "[::1]" ||
+          host.endsWith(".localhost");
+        if (!isLocal) {
+          throw new Error(
+            "send_file_from_url: a secure page cannot fetch plain-http URLs (except localhost)",
+          );
+        }
+      }
+      const name =
+        (typeof input.name === "string" && input.name.trim().slice(0, 255)) ||
+        decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() ?? "file");
+      let response: Response;
+      try {
+        response = await fetch(url.href);
+      } catch (err) {
+        throw new Error(
+          `send_file_from_url: fetch failed (CORS or unreachable) — ${err instanceof Error ? err.message : "network error"}`,
+        );
+      }
+      if (!response.ok) {
+        throw new Error(`send_file_from_url: source responded ${response.status}`);
+      }
+      // response.blob() lets the browser keep large bodies on disk, so a
+      // multi-GB source never has to materialize in heap either
+      const blob = await response.blob();
+      const file = new File([blob], name, {
+        type:
+          (typeof input.mime === "string" && input.mime.trim().slice(0, 128)) ||
+          blob.type ||
+          "application/octet-stream",
+      });
+      const [view] = needClient().sendMessage("", [file]);
+      return {
+        sent: true,
+        queuedBytes: file.size,
+        contentType: blob.type,
+        openPeerCount: openPeerCount(getClient()!),
         transfer: view ? { id: view.id, status: view.status } : null,
       };
     },
