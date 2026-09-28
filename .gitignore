@@ -4,3 +4,5 @@ dist/
 .DS_Store
 *.tsbuildinfo
 .wrangler
+# per-session playground (video builds, venvs, scratch data)
+.playground/

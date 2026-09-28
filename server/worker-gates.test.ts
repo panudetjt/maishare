@@ -222,7 +222,7 @@ describe("rate limiting on floodable endpoints", () => {
 describe("security headers on HTML navigations", () => {
   beforeEach(() => {
     env.ASSETS = {
-      fetch: async (req: Request) =>
+      fetch: async () =>
         new Response("<!doctype html><html><title>shell</title></html>", {
           headers: { "content-type": "text/html" },
         }),

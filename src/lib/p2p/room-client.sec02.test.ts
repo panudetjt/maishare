@@ -5,7 +5,7 @@
 // violation: the transfer aborts, the context clears, file-cancel backpressure
 // names the reason, and one toast tells the user. The byte counter reflects
 // bytes actually received and is never rewritten to the claim.
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { concatFrame, encoder, FRAME, type Control } from "./protocol";
 import {
   createRoomHarness,
@@ -16,6 +16,7 @@ import {
   type RoomHarness,
 } from "./room-client.test-harness";
 import { MAX_MIME_CHARS, MAX_NAME_CHARS } from "./room-client";
+import { MAX_STREAMABLE_SIZE, RAM_BUFFER_LIMIT } from "./spill";
 
 let restoreStubs: () => void;
 let h: RoomHarness;
@@ -129,7 +130,7 @@ describe("transfer size cross-check (SEC-02)", () => {
     const ch = h.openChannel(peer);
     await h.flush();
 
-    const badSizes = [NaN, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 2 ** 31 + 1];
+    const badSizes = [NaN, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, MAX_STREAMABLE_SIZE + 1];
     for (const [i, size] of badSizes.entries()) {
       ch.receive(fileStart(`bad-${i}`, size));
     }
@@ -222,6 +223,92 @@ describe("transfer size cross-check (SEC-02)", () => {
       keyed.dispose();
     } finally {
       restore();
+    }
+  });
+  it("refuses a disk-bound header without OPFS instead of buffering it", async () => {
+    await h.start();
+    const peer = h.addPeer(IMPOLITE_PEER);
+    const ch = h.openChannel(peer);
+    await h.flush();
+
+    // node has no navigator.storage → pickIncomingSink must say too-large
+    ch.receive(fileStart("huge", RAM_BUFFER_LIMIT + 1, "iso.img"));
+    await h.settle();
+
+    expect(h.client.getSnapshot().transfers).toHaveLength(0);
+    const cancel = (await outboundControls(ch)).find((c) => c.t === "file-cancel");
+    expect(cancel).toMatchObject({ id: "huge", reason: "too-large" });
+  });
+
+  it("streams a disk-bound transfer to OPFS and finishes from disk", async () => {
+    const files = new Map<string, Uint8Array[]>();
+    const root = {
+      async getDirectoryHandle() {
+        return rootThis();
+      },
+      async getFileHandle(name: string, opts?: { create?: boolean }) {
+        if (opts?.create) files.set(name, []);
+        const parts = files.get(name);
+        if (!parts) throw new Error("missing");
+        return {
+          async createWritable() {
+            let open = true;
+            return {
+              async write(data: ArrayBuffer) {
+                if (!open) throw new Error("closed");
+                parts.push(new Uint8Array(data));
+              },
+              async close() {
+                open = false;
+              },
+              async abort() {
+                open = false;
+              },
+            };
+          },
+          async getFile() {
+            const total = parts.reduce((n, p) => n + p.byteLength, 0);
+            const out = new Uint8Array(total);
+            let off = 0;
+            for (const p of parts) {
+              out.set(p, off);
+              off += p.byteLength;
+            }
+            return new File([out], name);
+          },
+        };
+      },
+      async removeEntry(name: string) {
+        files.delete(name);
+      },
+    };
+    function rootThis() {
+      return root;
+    }
+    vi.stubGlobal("navigator", { storage: { getDirectory: () => Promise.resolve(root) } });
+    try {
+      await h.start();
+      const peer = h.addPeer(IMPOLITE_PEER);
+      const ch = h.openChannel(peer);
+      await h.flush();
+
+      // announce far past the RAM limit, deliver a slice, finish
+      ch.receive(fileStart("big", RAM_BUFFER_LIMIT + 1024, "big.iso"));
+      await h.settle();
+      const v1 = h.client.getSnapshot().transfers.find((t) => t.id === "big");
+      expect(v1?.status).toBe("active");
+
+      ch.receive(chunk(new Uint8Array(1000).fill(7)));
+      ch.receive(fileEnd("big"));
+      await h.settle();
+
+      const v = h.client.getSnapshot().transfers.find((t) => t.id === "big")!;
+      expect(v.status).toBe("done");
+      expect(v.bytes).toBe(1000);
+      expect(v.blob?.size).toBe(1000);
+      expect(files.size).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

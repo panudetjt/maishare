@@ -1,6 +1,7 @@
 import { platformLabel, uuid } from "../device";
 import { resolveMime, sniffBlob, sniffBytes, suspiciousMismatch, type SniffInfo } from "../magika";
 import { concatFrame, decoder, encoder, ENC_OVERHEAD, FRAME, type Control } from "./protocol";
+import { MAX_STREAMABLE_SIZE, pickIncomingSink, type IncomingSink } from "./spill";
 import { RoomCipher } from "./crypto";
 import { Signaling, type RoomTransport, type SignalStatus } from "./signaling";
 import { LanProbe } from "./lan-probe";
@@ -17,10 +18,6 @@ export const PING_EVERY = 4000;
  * before the remote description lands, so past this the flood is dropped. */
 export const MAX_PENDING_CANDIDATES = 32;
 
-/** hard ceiling on an announced inbound transfer size (SEC-02) — comfortably
- * above anything a LAN handoff carries, far below what a 1-byte claim could
- * otherwise trick the receiver into buffering */
-export const MAX_TRANSFER_SIZE = 2 ** 31; // 2 GiB
 /** file-start string claims are clamped before any state is built from them */
 export const MAX_NAME_CHARS = 256;
 export const MAX_MIME_CHARS = 128;
@@ -43,6 +40,12 @@ export const INCOMING_START_COOLDOWN_MS = 1000;
 /** an inbound transfer with no chunk progress for this long has stalled and is
  * failed by the watchdog riding the per-peer ping interval (SEC-04) */
 export const INCOMING_STALE_MS = 30_000;
+
+/** how long after a *completed* inbound transfer its late tail chunks stay
+ * silent — chunks carry no transfer id (SEC-04), so a tail arriving after the
+ * file-end can only be wire reorder or a sender flush of a file the receiver
+ * already holds whole; telling the user to resend here would be a false alarm */
+export const DONE_TAIL_GRACE_MS = 15_000;
 /** file-cancel reason sent back when a transfer is retired as stale — one
  * string shared by the watchdog and the bulk Clear */
 export const STALE_CANCEL_REASON = "stalled";
@@ -145,7 +148,9 @@ interface SendJob {
 
 interface Incoming {
   view: TransferView;
-  chunks: Uint8Array<ArrayBuffer>[];
+  /** where received bytes go — RAM for small transfers, OPFS disk beyond
+   * RAM_BUFFER_LIMIT, so multi-GB files never have to fit in memory */
+  sink: IncomingSink;
   startedAt: number;
   lastEmitAt: number;
   lastEmitBytes: number;
@@ -189,6 +194,9 @@ interface PeerCtx {
   startBlockedUntil: number;
   /** when the peer context was allocated (monotonic) — drives the phantom-join sweep */
   createdAt: number;
+  /** performance.now() of this connection's last *completed* inbound transfer —
+   * gates the orphan-chunk alarm so a finished file's late tail stays silent */
+  lastDoneAt: number | null;
   /** one unreadable-frame warning per connection — no toast storms */
   undecryptableWarned: boolean;
 }
@@ -207,23 +215,6 @@ function hasCrypto(): boolean {
 
 /** how a control frame chooses its sealed form in sendControl */
 type SealMode = "auto" | "plain" | "proof";
-
-/** leading bytes across received chunks, bounded for sniffing */
-function headBytes(chunks: Uint8Array[], max: number): Uint8Array {
-  const total = Math.min(
-    max,
-    chunks.reduce((n, c) => n + c.length, 0),
-  );
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    if (off >= total) break;
-    const n = Math.min(c.length, total - off);
-    out.set(c.subarray(0, n), off);
-    off += n;
-  }
-  return out;
-}
 
 /** Wait for host-candidate gathering so localDescription is a complete SDP. */
 function gathered(pc: RTCPeerConnection, timeoutMs = 1500): Promise<void> {
@@ -427,26 +418,30 @@ export class RoomClient {
     }
   }
 
-  /** one message = optional text + optional files, all sharing one group id */
-  sendMessage(text: string, files: File[] | FileList) {
+  /** one message = optional text + optional files, all sharing one group id.
+   * Returns the outbound transfer views it created (empty for text-only) so
+   * callers — the WebMCP tools in particular — get ids without waiting out
+   * the 50 ms snapshot debounce */
+  sendMessage(text: string, files: File[] | FileList): TransferView[] {
     const t = text.trim();
     const list = Array.from(files).filter((f) => f && f.size >= 0);
-    if (!t && !list.length) return;
+    if (!t && !list.length) return [];
     if (!list.length) {
       this.sendChat(t);
-      return;
+      return [];
     }
     const groupId = rid();
     if (t) this.sendChat(t, groupId);
-    this.sendFiles(list, groupId);
+    return this.sendFiles(list, groupId);
   }
 
-  sendFiles(files: File[] | FileList, groupId: string = rid()) {
+  sendFiles(files: File[] | FileList, groupId: string = rid()): TransferView[] {
     const list = Array.from(files).filter((f) => f && f.size >= 0);
-    if (!list.length) return;
+    if (!list.length) return [];
     const openPeers = [...this.peers.values()].filter((p) => p.dc?.readyState === "open");
     const sealed =
       openPeers.length === 0 ? undefined : this.cipher !== null && openPeers.every((p) => p.proven);
+    const views: TransferView[] = [];
     for (const file of list) {
       const isImage = (file.type || "").startsWith("image/");
       const view: TransferView = {
@@ -469,6 +464,7 @@ export class RoomClient {
         ...(isImage ? { blobUrl: URL.createObjectURL(file) } : {}),
       };
       this.transfers = [view, ...this.transfers];
+      views.push(view);
       // content-type sniffing kicks off immediately so queued/deferred files
       // already show the right preview and icon
       void this.sniffTransfer(view, file);
@@ -485,6 +481,7 @@ export class RoomClient {
       this.toast("Waiting for a peer — files will send automatically when someone joins", "info");
     }
     this.schedule();
+    return views;
   }
 
   /**
@@ -521,6 +518,7 @@ export class RoomClient {
     } else {
       for (const p of this.peers.values()) {
         if (p.incoming?.view.id === id) {
+          p.incoming.sink.abort();
           p.incoming = null;
           void this.sendControl(p, { t: "file-cancel", id });
         }
@@ -538,6 +536,7 @@ export class RoomClient {
       const inc = p.incoming;
       if (inc && this.isIncomingStale(inc)) {
         stale.add(inc.view.id);
+        inc.sink.abort();
         p.incoming = null;
         void this.sendControl(p, {
           t: "file-cancel",
@@ -734,6 +733,7 @@ export class RoomClient {
       withheldFiles: [],
       startBlockedUntil: 0,
       createdAt: performance.now(),
+      lastDoneAt: null,
       undecryptableWarned: false,
     };
     pc.onicecandidate = ({ candidate }) => {
@@ -879,6 +879,7 @@ export class RoomClient {
     const inc = ctx.incoming;
     if (!inc || !this.isIncomingStale(inc)) return;
     ctx.incoming = null;
+    inc.sink.abort();
     inc.view.status = "error";
     this.toast(`"${inc.view.name}" stalled — no data for a while, transfer failed`, "error");
     // the sender is still pumping into a dead transfer — tell it
@@ -899,9 +900,8 @@ export class RoomClient {
    * CONNECT_TIMEOUT_MS with no remote description ever arrived — and release
    * their heavyweight allocations instead of holding them indefinitely */
   private sweepPeers() {
-    const now = Date.now();
     let changed = false;
-    for (const [peerId, ctx] of Array.from(this.peers)) {
+    for (const [, ctx] of Array.from(this.peers)) {
       if (
         ctx.status === "connecting" &&
         !ctx.pc.remoteDescription &&
@@ -1156,13 +1156,15 @@ export class RoomClient {
         // SEC-02: validate the claim before any state is built from it — the
         // announced header bounds what the receiver accepts. Bad claims never
         // start a transfer and draw explicit file-cancel backpressure.
+        // Sizes beyond RAM buffering stream to OPFS (see spill.ts); the
+        // practical ceiling becomes storage quota, not a fixed constant.
         const size = c.size;
         const id = typeof c.id === "string" ? c.id : "";
         const invalid =
           typeof size !== "number" ||
           !Number.isSafeInteger(size) ||
           size < 0 ||
-          size > MAX_TRANSFER_SIZE ||
+          size > MAX_STREAMABLE_SIZE ||
           typeof c.name !== "string" ||
           typeof c.mime !== "string";
         if (invalid) {
@@ -1179,6 +1181,7 @@ export class RoomClient {
           if (ctx.incoming) {
             const prev = ctx.incoming;
             ctx.incoming = null;
+            prev.sink.abort();
             prev.view.status = "cancelled";
             void this.sendControl(ctx, {
               t: "file-cancel",
@@ -1207,9 +1210,21 @@ export class RoomClient {
           groupId: c.g,
           sealed,
         };
+        const sink = pickIncomingSink(size);
+        if (sink === "too-large") {
+          // gigabytes announced but this browser has no disk spill — refuse
+          // with explicit backpressure instead of buffering into oblivion
+          void this.sendControl(ctx, { t: "file-cancel", id, reason: "too-large" });
+          this.toast(
+            `"${c.name.slice(0, MAX_NAME_CHARS)}" is too large for this browser's storage`,
+            "error",
+          );
+          this.schedule();
+          break;
+        }
         ctx.incoming = {
           view,
-          chunks: [],
+          sink,
           startedAt: performance.now(),
           lastEmitAt: performance.now(),
           lastEmitBytes: 0,
@@ -1223,7 +1238,10 @@ export class RoomClient {
         this.finishIncoming(ctx, c.id);
         break;
       case "file-cancel": {
-        if (ctx.incoming?.view.id === c.id) ctx.incoming = null;
+        if (ctx.incoming?.view.id === c.id) {
+          ctx.incoming.sink.abort();
+          ctx.incoming = null;
+        }
         const t = this.transfers.find((x) => x.id === c.id);
         if (t && t.status === "active") {
           t.status = "cancelled";
@@ -1265,6 +1283,11 @@ export class RoomClient {
   private onChunk(ctx: PeerCtx, body: Uint8Array<ArrayBuffer>) {
     const inc = ctx.incoming;
     if (!inc) {
+      // a completed transfer's late tail (wire reorder / sender flush): the
+      // file is already whole, so dropping it silently beats a false "resend"
+      if (ctx.lastDoneAt !== null && performance.now() - ctx.lastDoneAt <= DONE_TAIL_GRACE_MS) {
+        return;
+      }
       // data without a header: the file-start was lost (dropped sealed frame,
       // stale sender…) — surface it, never stay silent
       this.notifyUndecryptable(ctx, "orphan");
@@ -1274,14 +1297,26 @@ export class RoomClient {
     // abort instead of buffering what the sender never declared
     if (inc.view.bytes + body.byteLength > inc.view.size) {
       ctx.incoming = null;
+      inc.sink.abort();
       inc.view.status = "error";
       this.toast(`"${inc.view.name}" sent more data than announced — transfer aborted`, "error");
       void this.sendControl(ctx, { t: "file-cancel", id: inc.view.id, reason: "size-mismatch" });
       this.schedule();
       return;
     }
+    // a failed disk write (quota exhausted, storage evicted) settles the
+    // transfer instead of silently dropping gigabytes on the floor
+    if (inc.sink.failed) {
+      ctx.incoming = null;
+      inc.sink.abort();
+      inc.view.status = "error";
+      this.toast(`"${inc.view.name}" could not be written to storage — transfer failed`, "error");
+      void this.sendControl(ctx, { t: "file-cancel", id: inc.view.id, reason: "sink-failed" });
+      this.schedule();
+      return;
+    }
     inc.lastProgress = performance.now();
-    inc.chunks.push(body);
+    inc.sink.append(body);
     inc.view.bytes += body.byteLength;
     this.recvTotal += body.byteLength;
     const now = performance.now();
@@ -1298,30 +1333,41 @@ export class RoomClient {
     const inc = ctx.incoming;
     if (!inc || inc.view.id !== id) return;
     ctx.incoming = null;
+    ctx.lastDoneAt = performance.now();
     const v = inc.view;
-    const chunks = inc.chunks;
-    v.status = "done";
     const secs = (performance.now() - inc.startedAt) / 1000;
     v.speed = secs > 0 ? v.bytes / secs : 0;
-    // the counter keeps bytes actually received — never rewritten to the claim
-    // blob assembly waits for the content sniff so the Blob, the preview URL
-    // and the timeline render from verified bytes, not the sender's claim
-    void this.verifyIncoming(v, chunks);
+    // done the moment the wire says so — the sniff and blob assembly below
+    // only attach metadata; the counter keeps bytes actually received and
+    // is never rewritten to the claim
+    v.status = "done";
+    void this.verifyIncoming(v, inc.sink);
     this.schedule();
   }
 
-  private async verifyIncoming(v: TransferView, chunks: Uint8Array<ArrayBuffer>[]) {
-    const info = await sniffBytes(headBytes(chunks, 64 * 1024));
-    if (this.disposed || !this.transfers.includes(v)) return;
+  private async verifyIncoming(v: TransferView, sink: IncomingSink) {
+    const info = await sniffBytes(sink.head());
+    if (this.disposed || !this.transfers.includes(v)) {
+      sink.abort();
+      return;
+    }
     if (info) {
       v.detected = info;
       v.mime = resolveMime(v.mime, info);
       const warn = suspiciousMismatch(v.name, info);
       if (warn) this.toast(warn, "error");
     }
-    const blob = new Blob(chunks, { type: v.mime });
-    v.blob = blob;
-    v.blobUrl = URL.createObjectURL(blob);
+    try {
+      // RAM sink: an in-memory Blob; disk sink: the OPFS-backed File itself,
+      // so multi-GB results stream from disk instead of living in heap
+      const blob = await sink.finish();
+      v.blob = blob;
+      v.blobUrl = URL.createObjectURL(blob);
+    } catch {
+      v.status = "error";
+      sink.abort();
+      this.toast(`"${v.name}" could not be stored — transfer failed`, "error");
+    }
     this.schedule();
   }
 
@@ -1458,7 +1504,10 @@ export class RoomClient {
         t.status = "error";
       }
     }
-    if (ctx.incoming) ctx.incoming = null;
+    if (ctx.incoming) {
+      ctx.incoming.sink.abort();
+      ctx.incoming = null;
+    }
     const dead = [...this.outJobs.entries()].filter(([, jobs]) =>
       [...jobs].some((j) => jobs.size && j.view.peerId === ctx.peerId),
     );

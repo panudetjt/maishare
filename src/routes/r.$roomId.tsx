@@ -8,6 +8,7 @@ import {
 import { z } from "zod";
 import { useRoom } from "../lib/p2p/use-room";
 import type { ConsentRequest } from "../lib/p2p/room-client";
+import { registerRoomTools } from "../lib/p2p/webmcp";
 import { loadName, saveName, uuid } from "../lib/device";
 import { addRecent } from "../lib/recents";
 import { Conversation, type PendingFile } from "../components/Conversation";
@@ -77,6 +78,15 @@ function RoomRoute() {
   useEffect(() => {
     addRecent({ roomId, k: key, at: Date.now() });
   }, [roomId, key]);
+
+  // WebMCP (draft): expose the room pipeline as agent tools when the browser
+  // provides document.modelContext — absent API degrades to a silent no-op,
+  // and the tools inherit the page's key, consent gating and queueing
+  useEffect(() => {
+    if (!client) return;
+    const dispose = registerRoomTools(() => client, undefined, { getInvite: () => inviteUrl });
+    return () => dispose?.();
+  }, [client, inviteUrl]);
 
   // legacy ?k= links: scrub the query and move the key into the fragment, so
   // the key stops appearing in any request line after landing

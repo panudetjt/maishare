@@ -94,7 +94,6 @@ const attackerWs = new WebSocket(`${wsUrl(BASE)}?room=${ROOM}&peer=zznvattacker&
   origin: new URL(BASE).origin,
 });
 let victimPeer = null;
-let sent = false;
 const victim = await new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error("no victim peer seen")), 20_000);
   attackerWs.onmessage = (ev) => {

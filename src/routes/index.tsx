@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { z } from "zod";
 import { loadName, makeRoomCode, makeRoomKey, saveName } from "../lib/device";
 import { useLanRooms } from "../lib/discovery";
 import { clearRecents, loadRecents, type Recent } from "../lib/recents";
+import { registerHomeTools } from "../lib/p2p/webmcp";
 import { Bolt, Logo, QrIcon, TrashIcon, UsersIcon, WifiIcon } from "../components/Icons";
 import { InstallButton } from "../components/InstallPrompt";
 import { NearbyShare } from "../components/NearbyShare";
@@ -30,6 +31,14 @@ function HomeComponent() {
   const [joinValue, setJoinValue] = useState("");
   const [recents, setRecents] = useState<Recent[]>(initialRecents);
   const [nearbyOpen, setNearbyOpen] = useState(false);
+
+  // WebMCP (draft): home-page agent tools — create rooms, list recents and
+  // run the nearby handshake by passing share codes as strings; the room
+  // toolset rides along for the connected nearby session. No API = no-op.
+  useEffect(() => {
+    const dispose = registerHomeTools();
+    return () => dispose?.();
+  }, []);
 
   function commitName(v: string) {
     const n = v.trim().slice(0, 32);

@@ -15,7 +15,7 @@ import {
   type FakeDataChannel,
   type RoomHarness,
 } from "./room-client.test-harness";
-import { INCOMING_STALE_MS, PING_EVERY } from "./room-client";
+import { DONE_TAIL_GRACE_MS, INCOMING_STALE_MS, PING_EVERY } from "./room-client";
 
 let restoreStubs: () => void;
 let h: RoomHarness;
@@ -139,6 +139,46 @@ describe("transfer-list caps, supersede settle, stale sweep (SEC-04)", () => {
       await vi.advanceTimersByTimeAsync(PING_EVERY * 9);
       expect(inboundViews()[0].status).toBe("error");
       // the incoming context is gone: further chunks hit the orphan path
+      ch.receive(chunk(8));
+      await vi.advanceTimersByTimeAsync(60);
+      expect(
+        h.client
+          .getSnapshot()
+          .chats.filter((c) => c.system && c.text.includes("without its transfer header")),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a completed transfer's late tail silent — no false orphan alarm", async () => {
+    vi.useFakeTimers({ toFake: [...FAKED] });
+    try {
+      await h.client.start();
+      const peer = h.addPeer(IMPOLITE_PEER);
+      const ch = h.openChannel(peer);
+      await vi.advanceTimersByTimeAsync(60);
+
+      // finish a transfer cleanly: header → chunk → file-end
+      ch.receive(fileStart("late"));
+      ch.receive(chunk(8));
+      await vi.advanceTimersByTimeAsync(60);
+      ch.receive(fileEnd("late"));
+      await vi.advanceTimersByTimeAsync(60);
+      expect(inboundViews()[0]).toMatchObject({ id: "late", status: "done" });
+
+      // a tail chunk right after completion: the file is already whole, so
+      // the "ask the sender to resend" alarm would be false
+      ch.receive(chunk(8));
+      await vi.advanceTimersByTimeAsync(60);
+      expect(
+        h.client
+          .getSnapshot()
+          .chats.filter((c) => c.system && c.text.includes("without its transfer header")),
+      ).toHaveLength(0);
+
+      // past the grace window a header-less stream still trips the alarm once
+      await vi.advanceTimersByTimeAsync(DONE_TAIL_GRACE_MS + 1000);
       ch.receive(chunk(8));
       await vi.advanceTimersByTimeAsync(60);
       expect(
