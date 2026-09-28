@@ -41,6 +41,17 @@ export const INCOMING_START_COOLDOWN_MS = 1000;
  * failed by the watchdog riding the per-peer ping interval (SEC-04) */
 export const INCOMING_STALE_MS = 30_000;
 
+/** inbound queue previews (file-queued) retained per peer. Announces are
+ * informational only — beyond the cap they are dropped without backpressure,
+ * because nothing on the sender waits for announce acceptance: the file-start
+ * still creates the view when the transfer actually begins. */
+export const MAX_QUEUED_INCOMING_PER_PEER = 128;
+/** a queue preview with no file-start while the peer has nothing in flight
+ * this long is dead — the sender's pump moves between files in milliseconds,
+ * so a minute of total silence means the announced start never came. Retired
+ * by the same ping-interval sweep that fails stalled actives. */
+export const QUEUED_STALE_MS = 60_000;
+
 /** how long after a *completed* inbound transfer its late tail chunks stay
  * silent — chunks carry no transfer id (SEC-04), so a tail arriving after the
  * file-end can only be wire reorder or a sender flush of a file the receiver
@@ -556,6 +567,14 @@ export class RoomClient {
     if (!t || t.status === "done" || t.status === "cancelled") return;
     if (t.dir === "out") {
       this.deferred = this.deferred.filter((d) => d.view.id !== id);
+      for (const p of this.peers.values()) {
+        // peers previewing this file from our queue announce must hear the
+        // cancel — a job still sitting in their sender's queue never reaches
+        // the runJob path that notifies them on its own
+        if (p.queue.some((j) => j.view.id === id)) {
+          void this.sendControl(p, { t: "file-cancel", id });
+        }
+      }
       for (const jobs of this.outJobs.values()) {
         for (const j of jobs) if (j.view.id === id) j.view.status = "cancelled";
       }
@@ -566,6 +585,13 @@ export class RoomClient {
           p.incoming = null;
           void this.sendControl(p, { t: "file-cancel", id });
         }
+      }
+      // a cancelled queue preview holds no incoming slot — its sender-side job
+      // is still queued, so the peer must be told or the file would start
+      // arriving anyway
+      const peer = this.peers.get(t.peerId);
+      if (t.status === "queued" && peer) {
+        void this.sendControl(peer, { t: "file-cancel", id });
       }
     }
     t.status = "cancelled";
@@ -974,23 +1000,73 @@ export class RoomClient {
     }, PING_EVERY);
   }
 
-  /** SEC-04 watchdog: an inbound transfer with no chunk progress for
-   * INCOMING_STALE_MS has stalled — fail it instead of leaving it 'active'
-   * forever, so even without user action nothing is immune to cleanup */
+  /** SEC-04 watchdog riding the per-peer ping interval: an inbound transfer
+   * with no chunk progress for INCOMING_STALE_MS has stalled — fail it instead
+   * of leaving it 'active' forever; with nothing in flight, queue previews
+   * whose file-start never came are retired after QUEUED_STALE_MS */
   private sweepIncoming(ctx: PeerCtx) {
     const inc = ctx.incoming;
-    if (!inc || !this.isIncomingStale(inc)) return;
-    ctx.incoming = null;
-    inc.sink.abort();
-    inc.view.status = "error";
-    this.toast(`"${inc.view.name}" stalled — no data for a while, transfer failed`, "error");
-    // the sender is still pumping into a dead transfer — tell it
-    void this.sendControl(ctx, { t: "file-cancel", id: inc.view.id, reason: STALE_CANCEL_REASON });
+    if (inc) {
+      if (!this.isIncomingStale(inc)) return;
+      ctx.incoming = null;
+      inc.sink.abort();
+      inc.view.status = "error";
+      this.toast(`"${inc.view.name}" stalled — no data for a while, transfer failed`, "error");
+      // the sender is still pumping into a dead transfer — tell it
+      void this.sendControl(ctx, {
+        t: "file-cancel",
+        id: inc.view.id,
+        reason: STALE_CANCEL_REASON,
+      });
+      this.schedule();
+      return;
+    }
+    const now = Date.now();
+    const dead = this.transfers.filter(
+      (t) =>
+        t.dir === "in" &&
+        t.peerId === ctx.peerId &&
+        t.status === "queued" &&
+        now - t.at > QUEUED_STALE_MS,
+    );
+    if (!dead.length) return;
+    for (const t of dead) t.status = "cancelled";
+    this.toast(
+      dead.length === 1
+        ? `"${dead[0].name}" was announced but never started arriving — removed from the queue`
+        : `${dead.length} announced files never started arriving — removed from the queue`,
+      "info",
+    );
     this.schedule();
   }
 
   private isIncomingStale(inc: Incoming): boolean {
     return performance.now() - inc.lastProgress > INCOMING_STALE_MS;
+  }
+
+  /** this peer's queue preview for id, if one is still waiting to start */
+  private queuedPreview(ctx: PeerCtx, id: string): TransferView | undefined {
+    return this.transfers.find(
+      (t) => t.id === id && t.dir === "in" && t.peerId === ctx.peerId && t.status === "queued",
+    );
+  }
+
+  private queuedIncomingCount(ctx: PeerCtx): number {
+    let n = 0;
+    for (const t of this.transfers) {
+      if (t.dir === "in" && t.peerId === ctx.peerId && t.status === "queued") n++;
+    }
+    return n;
+  }
+
+  /** retire this peer's preview for id — the announced transfer will not
+   * start (refused header), so the row must not linger as 'queued' */
+  private settleQueuedPreview(ctx: PeerCtx, id: string) {
+    const t = this.queuedPreview(ctx, id);
+    if (t) {
+      t.status = "cancelled";
+      this.schedule();
+    }
   }
 
   /** may payload frames (chat, file-start, chunks) be delivered to this peer?
@@ -1102,6 +1178,17 @@ export class RoomClient {
   }
 
   private enqueue(ctx: PeerCtx, view: TransferView, file: File) {
+    // announce the queue position before anything is pumped so the receiver
+    // sees every upcoming file of the message up front — the data channel is
+    // ordered, so this frame always precedes this transfer's file-start
+    void this.sendControl(ctx, {
+      t: "file-queued",
+      id: view.id,
+      name: view.name,
+      size: view.size,
+      mime: view.mime,
+      g: view.groupId,
+    });
     const job: SendJob = { view, file, bytesSent: 0, done: false, failed: false };
     let jobs = this.outJobs.get(view.id);
     if (!jobs) {
@@ -1115,13 +1202,13 @@ export class RoomClient {
 
   // ---- frame io ----
 
-  private static PAYLOAD_CONTROLS = new Set<string>(["chat", "file-start"]);
+  private static PAYLOAD_CONTROLS = new Set<string>(["chat", "file-start", "file-queued"]);
 
   /**
-   * Send a control frame. `auto` seals only payload frames (chat, file-start)
-   * and only for peers that proved key possession — protocol frames stay
-   * unsealed so connectivity survives. `plain` never seals (back-channels);
-   * `proof` always seals (the pong echoing a challenge nonce).
+   * Send a control frame. `auto` seals only payload frames (chat, file-start,
+   * file-queued) and only for peers that proved key possession — protocol
+   * frames stay unsealed so connectivity survives. `plain` never seals
+   * (back-channels); `proof` always seals (the pong echoing a challenge nonce).
    */
   private async sendControl(ctx: PeerCtx, c: Control, mode: SealMode = "auto") {
     const dc = ctx.dc;
@@ -1331,6 +1418,49 @@ export class RoomClient {
           "error",
         );
         break;
+      case "file-queued": {
+        // queue preview only — no sink, no incoming slot, no backpressure.
+        // Same claim validation as file-start (SEC-02), but a bad, duplicate,
+        // or over-cap announce is simply ignored: the authoritative file-start
+        // still draws explicit backpressure when the transfer itself begins.
+        const size = c.size;
+        if (
+          typeof size !== "number" ||
+          !Number.isSafeInteger(size) ||
+          size < 0 ||
+          size > MAX_STREAMABLE_SIZE ||
+          typeof c.name !== "string" ||
+          typeof c.mime !== "string" ||
+          typeof c.id !== "string" ||
+          !c.id ||
+          // one preview per id — repeats (and post-start repeats) are noise
+          this.transfers.some((t) => t.id === c.id) ||
+          this.queuedIncomingCount(ctx) >= MAX_QUEUED_INCOMING_PER_PEER
+        ) {
+          break;
+        }
+        this.transfers = [
+          {
+            id: c.id,
+            dir: "in",
+            peerId: ctx.peerId,
+            peerName: ctx.name,
+            // clamped in length: over-long strings never reach the UI or buffers
+            name: c.name.slice(0, MAX_NAME_CHARS),
+            size,
+            mime: c.mime.slice(0, MAX_MIME_CHARS),
+            status: "queued",
+            bytes: 0,
+            speed: 0,
+            at: Date.now(),
+            groupId: c.g,
+            sealed,
+          },
+          ...this.transfers,
+        ];
+        this.schedule();
+        break;
+      }
       case "file-start": {
         // SEC-02: validate the claim before any state is built from it — the
         // announced header bounds what the receiver accepts. Bad claims never
@@ -1347,6 +1477,7 @@ export class RoomClient {
           typeof c.name !== "string" ||
           typeof c.mime !== "string";
         if (invalid) {
+          this.settleQueuedPreview(ctx, id);
           void this.sendControl(ctx, { t: "file-cancel", id, reason: "invalid-header" });
           this.schedule();
           break;
@@ -1369,16 +1500,27 @@ export class RoomClient {
             });
           }
           ctx.startBlockedUntil = performance.now() + INCOMING_START_COOLDOWN_MS;
+          this.settleQueuedPreview(ctx, id);
           void this.sendControl(ctx, { t: "file-cancel", id, reason: "busy" });
           this.schedule();
           break;
         }
-        const view: TransferView = {
+        // the queue preview may already know this transfer — promote it in
+        // place so the row (and its timeline position) stays stable
+        const existing = this.queuedPreview(ctx, id);
+        if (existing) {
+          // the start frame is authoritative: sniffed mime, clamped strings
+          existing.name = c.name.slice(0, MAX_NAME_CHARS);
+          existing.size = size;
+          existing.mime = c.mime.slice(0, MAX_MIME_CHARS);
+          existing.sealed = sealed;
+          existing.status = "active";
+        }
+        const view: TransferView = existing ?? {
           id,
           dir: "in",
           peerId: ctx.peerId,
           peerName: ctx.name,
-          // clamped in length: over-long strings never reach the UI or buffers
           name: c.name.slice(0, MAX_NAME_CHARS),
           size,
           mime: c.mime.slice(0, MAX_MIME_CHARS),
@@ -1393,6 +1535,7 @@ export class RoomClient {
         if (sink === "too-large") {
           // gigabytes announced but this browser has no disk spill — refuse
           // with explicit backpressure instead of buffering into oblivion
+          if (existing) existing.status = "cancelled";
           void this.sendControl(ctx, { t: "file-cancel", id, reason: "too-large" });
           this.toast(
             `"${c.name.slice(0, MAX_NAME_CHARS)}" is too large for this browser's storage`,
@@ -1409,7 +1552,7 @@ export class RoomClient {
           lastEmitBytes: 0,
           lastProgress: performance.now(),
         };
-        this.transfers = [view, ...this.transfers];
+        if (!existing) this.transfers = [view, ...this.transfers];
         this.schedule();
         break;
       }
@@ -1422,7 +1565,12 @@ export class RoomClient {
           ctx.incoming = null;
         }
         const t = this.transfers.find((x) => x.id === c.id);
-        if (t && t.status === "active") {
+        // actives settle as before; queued settles cover the queue previews in
+        // both roles — a receiver cancelling a file it was promised, and a
+        // sender retracting a file still parked in its own queue. (A peer only
+        // ever learns a queued id from our own announce, so echoing one back
+        // is exactly the "don't send me this" signal.)
+        if (t && (t.status === "active" || t.status === "queued")) {
           t.status = "cancelled";
           this.schedule();
         }

@@ -29,6 +29,13 @@ export type Control =
   // `g` groups files attached to the same message — the PhotoSwipe gallery
   // (swipe between them) is built from it on both sides
   | { t: "file-start"; id: string; name: string; size: number; mime: string; g: string }
+  // sent for every file of a message as soon as it is queued on the sender —
+  // before any byte moves — so the receiver renders the whole queue up front
+  // and never mistakes the first finished file for the end of the transfer.
+  // Purely informational: the transfer itself still begins with file-start,
+  // which promotes the previewed entry in place (an older receiver ignores
+  // this frame and behaves exactly as before).
+  | { t: "file-queued"; id: string; name: string; size: number; mime: string; g: string }
   | { t: "file-end"; id: string }
   | { t: "file-cancel"; id: string; reason?: string }
   // key-proof exchange (SEC-01): the challenger seals a ping carrying a nonce

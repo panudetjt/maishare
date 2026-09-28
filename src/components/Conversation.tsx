@@ -821,7 +821,9 @@ function statusText(t: TransferView): string {
     case "cancelled":
       return "cancelled";
     case "queued":
-      return "waiting for a peer…";
+      // inbound rows are queue previews from the sender's file-queued frame —
+      // the point of the label is "this is not the end, more files are coming"
+      return t.dir === "in" ? "in queue — more files coming" : "waiting for a peer…";
     default:
       return "sending";
   }

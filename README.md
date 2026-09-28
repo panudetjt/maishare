@@ -156,7 +156,12 @@ only — the data path stays pure P2P.
 - **File transfer** (`src/lib/p2p/protocol.ts`, `src/lib/p2p/spill.ts`): `[1-byte
 type][payload]` wire — JSON control frames interleave with raw binary chunks of the
   single active transfer per connection (the channel is ordered+reliable, so
-  `file-start` → chunks → `file-end` is self-framing). Chunk size is negotiated from
+  `file-start` → chunks → `file-end` is self-framing). Every file of a multi-file
+  message is announced up front with `file-queued` as soon as it is queued, so the
+  receiver sees the whole queue — with "in queue — more files coming" rows — instead
+  of mistaking the first finished file for the end of the transfer (previews are
+  validated, capped per peer, and swept if their `file-start` never comes).
+  Chunk size is negotiated from
   SCTP `maxMessageSize`; the pump pauses above 8 MB buffered and resumes at 2 MB. On
   receive, chunks stream into a sink: RAM up to 64 MiB, then a **disk sink in OPFS**
   whose `finish()` yields the OPFS-backed `File` — multi-GB results never live in

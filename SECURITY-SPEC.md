@@ -54,7 +54,7 @@ Confirmed findings and the decided remediations. Severity reflects the audit's d
 
 - Root cause: the per-peer sealing decision trusts the peer's self-asserted capability flag; "cannot do WebCrypto" and "does not have the key" are indistinguishable, and the ambiguity resolves toward plaintext delivery.
 - Decision: separate capability from proof. A peer context gains a distinct "proven" state that is set only by a key-confirmation exchange (the sender seals a ping carrying a nonce; only a key holder can return a sealed pong echoing it) — or by explicit per-peer user consent, which remains the escape hatch for genuinely WebCrypto-incapable peers (the documented iOS/plain-HTTP case).
-- While the local room key exists, payload controls (chat, file-start, and file chunks) are withheld — never downgraded — to peers that are neither proven nor consented. Protocol frames (hello, ping, pong, bye, file-end, file-cancel, undecryptable) stay unsealed so connectivity survives.
+- While the local room key exists, payload controls (chat, file-start, file-queued, and file chunks) are withheld — never downgraded — to peers that are neither proven nor consented. Protocol frames (hello, ping, pong, bye, file-end, file-cancel, undecryptable) stay unsealed so connectivity survives.
 - The welcome/transport retry path carries the peer-id ownership token (SEC-08) and the proof nonce flow rides the existing ping/pong controls; no new wire frame types are introduced beyond the nonce field.
 - The UI shows one prominent blocking consent prompt per unproven peer, replacing the current post-hoc open-lock icon as the only disclosure. The room-header lock continues to reflect key presence.
 - e2e regression: a secure-context joiner without the key must receive no chat/file content; the existing insecure-context (no crypto.subtle) case clicks through the consent gate.
@@ -76,6 +76,7 @@ Confirmed findings and the decided remediations. Severity reflects the audit's d
 - Concurrent in-flight inbound transfers per peer are capped; excess file-starts get an explicit file-cancel backpressure response and are not enqueued.
 - A superseding file-start settles the previous incoming view to cancelled instead of orphaning it; a late file-end for a settled id is ignored (existing id-guard behavior).
 - An inactivity watchdog (riding the existing per-peer ping interval) fails stalled 'active' inbound transfers; the bulk clear also retires stale actives, so the Clear action always bounds the list. Object URLs of dropped entries are revoked.
+- Queue previews (`file-queued` announces, informational frames sent before any byte moves) get the same SEC-02 claim validation but draw no backpressure — nothing on the sender waits for announce acceptance. They are capped per peer (dropped beyond the cap), promote in place to 'active' on their file-start (one row per id, never a duplicate), are settled by file-cancel from either end, and are swept once the peer has nothing in flight and the announced start never came.
 
 ### SEC-05 (medium) — Uncapped roster-driven RTCPeerConnection fan-out
 
