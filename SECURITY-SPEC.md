@@ -58,6 +58,7 @@ Confirmed findings and the decided remediations. Severity reflects the audit's d
 - The welcome/transport retry path carries the peer-id ownership token (SEC-08) and the proof nonce flow rides the existing ping/pong controls; no new wire frame types are introduced beyond the nonce field.
 - The UI shows one prominent blocking consent prompt per unproven peer, replacing the current post-hoc open-lock icon as the only disclosure. The room-header lock continues to reflect key presence.
 - e2e regression: a secure-context joiner without the key must receive no chat/file content; the existing insecure-context (no crypto.subtle) case clicks through the consent gate.
+- Unreadable deliveries surface back to the sender, never silence in either direction: the receiver's `undecryptable` back-channel carries the failed kind (message frame vs file chunk), and the sender correlates it against the payloads it sealed to that peer while unproven — stamping the affected chats/transfers with `unreadableBy` and appending a persistent system bubble naming the peer (a four-second toast alone was the old behavior).
 
 ### SEC-02 (medium) — Receiver chunk buffer never cross-checks the announced size
 
@@ -70,6 +71,7 @@ Confirmed findings and the decided remediations. Severity reflects the audit's d
 ### SEC-03 (medium) — Chat timeline grows without per-frame or aggregate caps
 
 - Inbound chat text is truncated to match the composer's outbound limit; the retained chat list is kept under a rolling cap (drop oldest). Both apply to plaintext frames regardless of room key, since wrong-key members can send them.
+- Text past the chat-frame cap travels through the file pipeline instead (chunked, backpressured): an `asText` hint on file-start/file-queued has receivers render it back as a text bubble, honored only when the announced size fits the inline-render ceiling (MAX_TEXTFILE_BYTES, 1 MiB) — an oversized or hostile hint degrades to an ordinary file card, never an unbounded DOM bubble.
 
 ### SEC-04 (medium) — Transfer-list entries survive the receiver's only bulk clear
 
@@ -145,19 +147,19 @@ Seams — existing, in preference order (highest first). All were exercised duri
 
 One new seam is proposed, at the highest useful point: a pure filename-sanitizer helper (basename flattening, extension handling) extracted from the zip/download naming logic, so NV-01's preventive option — if adopted — is testable without a browser. No other new seams.
 
-| Spec ID  | Invariant (abbreviated)                                                                               | Seam                    | Test style                                                                                                          |
-| -------- | ----------------------------------------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| SEC-01   | Payload frames withheld to unproven/unconsented peers in keyed rooms                                  | e2e + RoomClient        | e2e regression; frame-type assertions (sealed vs withheld vs consented plaintext); wrong-key warning path unchanged |
-| SEC-02   | received ≤ claimed ≤ ceiling; abort on first excess byte                                              | RoomClient              | file-start size=1 + chunks → error + file-cancel back; honest transfer completes byte-exact; claim clamps           |
-| SEC-03   | chat text truncated; rolling cap on retained chats                                                    | RoomClient              | large/multi frames accepted-but-bounded; Clear + refill; keyed-room plaintext frames bounded                        |
-| SEC-04   | concurrent inbound cap + backpressure; supersede settles; stale-active timeout; Clear bounds the list | RoomClient              | file-start floods; complete-cycle Blob/URL release; watchdog via fake timers                                        |
-| SEC-05   | client peer cap + connecting timeout; server room/per-address caps                                    | RoomClient + DO         | roster N>cap → capped allocations, inert extras; join beyond caps → 429, probe joins exempt                         |
-| SEC-06   | candidate queue capped pre-description; post-description path unchanged                               | RoomClient              | candidate flood bounded at cap; one description drains exactly the queued set                                       |
-| SEC-07   | roster content only for provable relations; room id always for matches                                | Lobby/predicate         | CGNAT exact match → names withheld; private /24 and /64 → full response; predicate unit table                       |
-| SEC-08   | eviction only with the ownership token; reconnect reclaims                                            | DO                      | token-less same-id join refused, incumbent open; token join replaces; probe join never evicts                       |
-| SEC-09   | input cap before decode; counting inflate abort; sdp cap                                              | share-code module       | bomb fixtures rejected at each stage with distinct errors; real codes still unpack                                  |
-| SEC-10   | only valid IPs become identity; dev/preview default localhost                                         | DO + predicate + config | headerless/'local'/arbitrary values never match externally; valid-IP paths unchanged; config default assertion      |
-| NV-01…06 | owner-observed checks recorded                                                                        | per lead                | scripted two-origin/two-tab procedures from the audit's validation plans; results recorded as evidence notes        |
+| Spec ID  | Invariant (abbreviated)                                                                                        | Seam                    | Test style                                                                                                                                  |
+| -------- | -------------------------------------------------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| SEC-01   | Payload frames withheld to unproven/unconsented peers in keyed rooms                                           | e2e + RoomClient        | e2e regression; frame-type assertions (sealed vs withheld vs consented plaintext); wrong-key warning path unchanged                         |
+| SEC-02   | received ≤ claimed ≤ ceiling; abort on first excess byte                                                       | RoomClient              | file-start size=1 + chunks → error + file-cancel back; honest transfer completes byte-exact; claim clamps                                   |
+| SEC-03   | chat text truncated; rolling cap on retained chats; long text rides the file pipeline under a 1 MiB render cap | RoomClient              | large/multi frames accepted-but-bounded; Clear + refill; keyed-room plaintext frames bounded; oversized asText hint degraded to a file card |
+| SEC-04   | concurrent inbound cap + backpressure; supersede settles; stale-active timeout; Clear bounds the list          | RoomClient              | file-start floods; complete-cycle Blob/URL release; watchdog via fake timers                                                                |
+| SEC-05   | client peer cap + connecting timeout; server room/per-address caps                                             | RoomClient + DO         | roster N>cap → capped allocations, inert extras; join beyond caps → 429, probe joins exempt                                                 |
+| SEC-06   | candidate queue capped pre-description; post-description path unchanged                                        | RoomClient              | candidate flood bounded at cap; one description drains exactly the queued set                                                               |
+| SEC-07   | roster content only for provable relations; room id always for matches                                         | Lobby/predicate         | CGNAT exact match → names withheld; private /24 and /64 → full response; predicate unit table                                               |
+| SEC-08   | eviction only with the ownership token; reconnect reclaims                                                     | DO                      | token-less same-id join refused, incumbent open; token join replaces; probe join never evicts                                               |
+| SEC-09   | input cap before decode; counting inflate abort; sdp cap                                                       | share-code module       | bomb fixtures rejected at each stage with distinct errors; real codes still unpack                                                          |
+| SEC-10   | only valid IPs become identity; dev/preview default localhost                                                  | DO + predicate + config | headerless/'local'/arbitrary values never match externally; valid-IP paths unchanged; config default assertion                              |
+| NV-01…06 | owner-observed checks recorded                                                                                 | per lead                | scripted two-origin/two-tab procedures from the audit's validation plans; results recorded as evidence notes                                |
 
 ## Out of Scope
 

@@ -970,6 +970,12 @@ input::placeholder {
 .msg-lock.is-open {
   color: var(--warn);
 }
+/* peers reported this message as unreadable (received sealed bytes without
+ * the room key) — same glyph family as the system warning bubbles */
+.msg-warn {
+  color: var(--warn);
+  font-size: 11px;
+}
 .msg-mine {
   align-self: flex-end;
   align-items: flex-end;
@@ -1109,6 +1115,12 @@ input::placeholder {
 .bubble-file-meta {
   font-size: 12px;
   color: var(--dim);
+}
+/* a peer reported this delivered file as unreadable (no room key) */
+.bubble-file-warn {
+  font-size: 12px;
+  color: var(--warn);
+  cursor: help;
 }
 .bubble-actions {
   display: flex;

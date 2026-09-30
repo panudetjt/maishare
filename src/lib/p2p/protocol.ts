@@ -27,15 +27,34 @@ export type Control =
   // so both sides render text + attachments as one bubble
   | { t: "chat"; id: string; text: string; at: number; g?: string }
   // `g` groups files attached to the same message — the PhotoSwipe gallery
-  // (swipe between them) is built from it on both sides
-  | { t: "file-start"; id: string; name: string; size: number; mime: string; g: string }
+  // (swipe between them) is built from it on both sides. `asText` marks a
+  // long chat text that exceeded the chat-frame cap and travels as a .txt
+  // file instead — receivers that know the field render it back as a text
+  // bubble; older receivers ignore it and show an ordinary file card.
+  | {
+      t: "file-start";
+      id: string;
+      name: string;
+      size: number;
+      mime: string;
+      g: string;
+      asText?: boolean;
+    }
   // sent for every file of a message as soon as it is queued on the sender —
   // before any byte moves — so the receiver renders the whole queue up front
   // and never mistakes the first finished file for the end of the transfer.
   // Purely informational: the transfer itself still begins with file-start,
   // which promotes the previewed entry in place (an older receiver ignores
-  // this frame and behaves exactly as before).
-  | { t: "file-queued"; id: string; name: string; size: number; mime: string; g: string }
+  // this frame and behaves exactly as before). `asText` as on file-start.
+  | {
+      t: "file-queued";
+      id: string;
+      name: string;
+      size: number;
+      mime: string;
+      g: string;
+      asText?: boolean;
+    }
   | { t: "file-end"; id: string }
   | { t: "file-cancel"; id: string; reason?: string }
   // key-proof exchange (SEC-01): the challenger seals a ping carrying a nonce
@@ -52,8 +71,12 @@ export type Control =
   | { t: "key-request" }
   | { t: "key-offer"; k: string }
   /** receiver -> sender: a frame arrived that could not be read. Always sent
-   * as a PLAIN control frame so the sender can parse it regardless of keys. */
-  | { t: "undecryptable"; detail: "sealed" | "malformed" | "orphan" };
+   * as a PLAIN control frame so the sender can parse it regardless of keys.
+   * `kind` says whether a message frame or file bytes failed — the receiver
+   * cannot name the item, since a sealed frame's payload is unreadable to it
+   * too, so the sender correlates the report against what it sealed to this
+   * peer while it was still unproven. */
+  | { t: "undecryptable"; detail: "sealed" | "malformed" | "orphan"; kind?: "frame" | "chunk" };
 
 export function concatFrame(type: number, payload: Uint8Array): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(1 + payload.length);

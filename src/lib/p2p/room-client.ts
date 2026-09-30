@@ -29,6 +29,16 @@ export const MAX_CHAT_CHARS = 8000;
  * streaming maximal frames from growing memory and per-render cost unbounded */
 export const MAX_RETAINED_CHATS = 200;
 
+/** texts past the chat-frame cap travel as a .txt file through the file
+ * pipeline (chunked, backpressured) instead — receivers that know the
+ * `asText` hint render it back as a chat bubble. Above this byte ceiling the
+ * hint is withheld: the message still delivers, but as an ordinary file card,
+ * because rendering megabytes of text inline would freeze the bubble. */
+export const MAX_TEXTFILE_BYTES = 1024 * 1024;
+/** filename the long-text wrapper carries — purely cosmetic (bubble render
+ * uses the `asText` hint, not the name) */
+export const MESSAGE_FILE_NAME = "message.txt";
+
 /** concurrent in-flight inbound transfers per peer (SEC-04). Chunks carry no
  * transfer id, so the protocol is one-at-a-time by construction: a file-start
  * arriving while one is in flight settles the previous as cancelled and is
@@ -99,6 +109,9 @@ export interface ChatMsg {
   sealed?: boolean;
   /** placeholder for a frame that could not be read — never sent anywhere */
   system?: boolean;
+  /** names of peers that reported this message back as unreadable — they
+   * received a sealed copy without holding the room key */
+  unreadableBy?: string[];
 }
 
 export type TransferStatus = "queued" | "active" | "done" | "error" | "cancelled";
@@ -124,6 +137,16 @@ export interface TransferView {
   /** content-derived type from Magika sniffing — absent until the wasm runs
    * or when it could not be loaded */
   detected?: SniffInfo;
+  /** long chat text carried as a .txt file — the UI renders it as a text
+   * bubble instead of a file card (accepted from the wire only when the
+   * transfer is small enough to render inline) */
+  asText?: boolean;
+  /** decoded message text for asText views — set synchronously on the sender,
+   * extracted from the finished blob on the receiver */
+  text?: string;
+  /** names of peers that reported this transfer back as unreadable — they
+   * received sealed bytes without holding the room key */
+  unreadableBy?: string[];
 }
 
 export interface Toast {
@@ -222,6 +245,11 @@ interface PeerCtx {
   lastDoneAt: number | null;
   /** one unreadable-frame warning per connection — no toast storms */
   undecryptableWarned: boolean;
+  /** ids of payloads we SEALED to this peer while it was unproven — the only
+   * frames it could report as unreadable. Cleared once key possession is
+   * proven: everything sent after that opens fine on its side. */
+  sealedChats: Set<string>;
+  sealedFiles: Set<string>;
   /** we asked this peer to share the room key (once per connection) */
   keyRequested: boolean;
   /** the user answered the key-share prompt for this peer (either way) */
@@ -230,6 +258,12 @@ interface PeerCtx {
 
 function rid(): string {
   return uuid();
+}
+
+/** union a peer name into a chat/transfer's unreadable-by list — several
+ * peers may report the same item; each name appears once */
+function withUnreadableBy(current: string[] | undefined, name: string): string[] {
+  return current?.includes(name) ? current : [...(current ?? []), name];
 }
 
 /** hello.e2e declares WebCrypto capability only — crypto.subtle needs a
@@ -465,8 +499,14 @@ export class RoomClient {
       // keyed rooms withhold payloads from peers that neither proved key
       // possession nor drew an explicit consent — never downgrade to plaintext
       for (const ctx of openPeers) {
-        if (this.deliverable(ctx)) void this.sendControl(ctx, frame);
-        else ctx.withheldChats.push(frame);
+        if (this.deliverable(ctx)) {
+          void this.sendControl(ctx, frame);
+          // a sealed copy to a peer that has not proven the key is the one
+          // thing it may later report back as unreadable — remember it
+          if (this.cipher !== null && !ctx.consented && !ctx.proven) ctx.sealedChats.add(msg.id);
+        } else {
+          ctx.withheldChats.push(frame);
+        }
       }
     } else {
       this.pendingChats.push(frame);
@@ -476,21 +516,42 @@ export class RoomClient {
   /** one message = optional text + optional files, all sharing one group id.
    * Returns the outbound transfer views it created (empty for text-only) so
    * callers — the WebMCP tools in particular — get ids without waiting out
-   * the 50 ms snapshot debounce */
+   * the 50 ms snapshot debounce. Text past the chat-frame cap routes through
+   * the file pipeline as an asText transfer instead — chat frames are single
+   * datagrams with no chunking of their own, so oversized ones would burst
+   * the data channel's negotiated max message size. */
   sendMessage(text: string, files: File[] | FileList): TransferView[] {
     const t = text.trim();
     const list = Array.from(files).filter((f) => f && f.size >= 0);
     if (!t && !list.length) return [];
-    if (!list.length) {
+    if (!list.length && t.length <= MAX_CHAT_CHARS) {
       this.sendChat(t);
       return [];
     }
     const groupId = rid();
-    if (t) this.sendChat(t, groupId);
-    return this.sendFiles(list, groupId);
+    let textViews: TransferView[] = [];
+    if (t) {
+      if (t.length > MAX_CHAT_CHARS) textViews = this.sendLongText(t, groupId);
+      else this.sendChat(t, groupId);
+    }
+    return [...textViews, ...this.sendFiles(list, groupId)];
   }
 
-  sendFiles(files: File[] | FileList, groupId: string = rid()): TransferView[] {
+  /** Send a long chat text through the file pipeline: wrapped as a .txt file
+   * with the `asText` hint so receivers render it back as a chat bubble.
+   * Above MAX_TEXTFILE_BYTES the hint is withheld — the message still
+   * delivers, but as an ordinary downloadable file card. */
+  sendLongText(text: string, groupId: string = rid()): TransferView[] {
+    const file = new File([text], MESSAGE_FILE_NAME, { type: "text/plain" });
+    const asText = file.size <= MAX_TEXTFILE_BYTES;
+    return this.sendFiles([file], groupId, { asText, text });
+  }
+
+  sendFiles(
+    files: File[] | FileList,
+    groupId: string = rid(),
+    opts?: { asText?: boolean; text?: string },
+  ): TransferView[] {
     const list = Array.from(files).filter((f) => f && f.size >= 0);
     if (!list.length) return [];
     const openPeers = [...this.peers.values()].filter((p) => p.dc?.readyState === "open");
@@ -517,6 +578,9 @@ export class RoomClient {
         // blobUrl preview is only needed for images
         blob: file,
         ...(isImage ? { blobUrl: URL.createObjectURL(file) } : {}),
+        // sender-side long text: the bubble can render immediately from the
+        // string in hand — no blob read needed
+        ...(opts?.asText ? { asText: true, text: opts.text } : {}),
       };
       this.transfers = [view, ...this.transfers];
       views.push(view);
@@ -853,6 +917,8 @@ export class RoomClient {
       createdAt: performance.now(),
       lastDoneAt: null,
       undecryptableWarned: false,
+      sealedChats: new Set(),
+      sealedFiles: new Set(),
       keyRequested: false,
       keyShareDecided: false,
     };
@@ -1188,7 +1254,11 @@ export class RoomClient {
       size: view.size,
       mime: view.mime,
       g: view.groupId,
+      ...(view.asText ? { asText: true } : {}),
     });
+    // same unreadable-delivery ledger as chats: a sealed copy to an unproven
+    // peer may come back as an undecryptable report — remember the transfer
+    if (this.cipher !== null && !ctx.consented && !ctx.proven) ctx.sealedFiles.add(view.id);
     const job: SendJob = { view, file, bytesSent: 0, done: false, failed: false };
     let jobs = this.outJobs.get(view.id);
     if (!jobs) {
@@ -1280,7 +1350,7 @@ export class RoomClient {
         dc.send(
           concatFrame(
             FRAME.CONTROL,
-            encoder.encode(JSON.stringify({ t: "undecryptable", detail })),
+            encoder.encode(JSON.stringify({ t: "undecryptable", detail, kind })),
           ),
         );
       } catch {}
@@ -1410,14 +1480,51 @@ export class RoomClient {
         this.capChats();
         this.schedule();
         break;
-      case "undecryptable":
+      case "undecryptable": {
         this.toast(
           c.detail === "orphan"
             ? "The other side got file data without a header — resend the file"
             : "Your message could not be decrypted by the other side",
           "error",
         );
+        if (c.detail === "sealed") {
+          // the receiver cannot name what failed — the payload was sealed to
+          // it too — so correlate the report against the ledger of what we
+          // sealed to this peer while it was still unproven. A persistent
+          // system bubble keeps the failure in the timeline (the toast alone
+          // vanished in four seconds and fired once per connection).
+          const name = ctx.name;
+          if (ctx.sealedChats.size) {
+            this.chats = this.chats.map((m) =>
+              ctx.sealedChats.has(m.id)
+                ? { ...m, unreadableBy: withUnreadableBy(m.unreadableBy, name) }
+                : m,
+            );
+          }
+          if (ctx.sealedFiles.size) {
+            for (const v of this.transfers) {
+              if (ctx.sealedFiles.has(v.id))
+                v.unreadableBy = withUnreadableBy(v.unreadableBy, name);
+            }
+          }
+          const what = c.kind === "chunk" ? "the file you sent" : "your recent messages";
+          this.chats = [
+            ...this.chats,
+            {
+              id: rid(),
+              peerId: ctx.peerId,
+              name,
+              text: `⚠︎ ${name} couldn't read ${what} — they don't have the room key. Share the key or resend once they do.`,
+              at: Date.now(),
+              mine: false,
+              system: true,
+            },
+          ];
+          this.capChats();
+        }
+        this.schedule();
         break;
+      }
       case "file-queued": {
         // queue preview only — no sink, no incoming slot, no backpressure.
         // Same claim validation as file-start (SEC-02), but a bad, duplicate,
@@ -1455,6 +1562,10 @@ export class RoomClient {
             at: Date.now(),
             groupId: c.g,
             sealed,
+            // long-text hint is only honored when the transfer is small
+            // enough to render inline — a hostile oversized claim degrades
+            // to an ordinary file card instead of a DOM-filling bubble
+            ...(c.asText === true && size <= MAX_TEXTFILE_BYTES ? { asText: true } : {}),
           },
           ...this.transfers,
         ];
@@ -1507,6 +1618,9 @@ export class RoomClient {
         }
         // the queue preview may already know this transfer — promote it in
         // place so the row (and its timeline position) stays stable
+        // the long-text hint rides the authoritative start frame: honored
+        // only when the transfer is small enough to render inline
+        const asText = c.asText === true && size <= MAX_TEXTFILE_BYTES;
         const existing = this.queuedPreview(ctx, id);
         if (existing) {
           // the start frame is authoritative: sniffed mime, clamped strings
@@ -1515,6 +1629,7 @@ export class RoomClient {
           existing.mime = c.mime.slice(0, MAX_MIME_CHARS);
           existing.sealed = sealed;
           existing.status = "active";
+          existing.asText = asText;
         }
         const view: TransferView = existing ?? {
           id,
@@ -1530,6 +1645,7 @@ export class RoomClient {
           at: Date.now(),
           groupId: c.g,
           sealed,
+          ...(asText ? { asText: true } : {}),
         };
         const sink = pickIncomingSink(size);
         if (sink === "too-large") {
@@ -1596,6 +1712,12 @@ export class RoomClient {
         if (sealed && typeof c.n === "string" && ctx.proofNonce != null && c.n === ctx.proofNonce) {
           ctx.proofNonce = null;
           ctx.proven = true;
+          // everything from here on opens on their side — the sealed ledger
+          // only ever covers the pre-proof window (any report from it has
+          // already arrived: the channel is ordered, and the receiver sends
+          // it the moment the first unreadable frame lands)
+          ctx.sealedChats.clear();
+          ctx.sealedFiles.clear();
           this.flushForPeer(ctx);
           this.schedule();
         }
@@ -1690,6 +1812,9 @@ export class RoomClient {
       const blob = await sink.finish();
       v.blob = blob;
       v.blobUrl = URL.createObjectURL(blob);
+      // long-text message: pull the bubble's string out of the finished blob
+      // (guarded by the asText size bound at file-start, so at most 1 MiB)
+      if (v.asText) v.text = (await blob.text()).slice(0, MAX_TEXTFILE_BYTES);
     } catch {
       v.status = "error";
       sink.abort();
@@ -1733,6 +1858,7 @@ export class RoomClient {
       size: file.size,
       mime: view.mime,
       g: view.groupId,
+      ...(view.asText ? { asText: true } : {}),
     });
     let offset = 0;
     let lastEmitAt = performance.now();

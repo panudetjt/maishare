@@ -25,6 +25,8 @@ export interface TimelineMessage {
   sealed: boolean | undefined;
   /** unreadable-frame placeholder — render with the warning style, no actions */
   system: boolean;
+  /** peers that reported parts of this message back as unreadable */
+  unreadableBy?: string[];
 }
 
 export function dayKeyOf(at: number): string {
@@ -60,6 +62,7 @@ interface Item {
   system?: boolean;
   sealed?: boolean;
   groupId?: string;
+  unreadableBy?: string[];
   transfer?: TransferView;
 }
 
@@ -77,6 +80,7 @@ function collectItems(state: Pick<RoomState, "chats" | "transfers" | "selfId">):
       system: m.system,
       sealed: m.sealed,
       groupId: m.groupId,
+      unreadableBy: m.unreadableBy,
     });
   }
   // transfers are stored newest-first; flip so a stable sort keeps send order
@@ -91,6 +95,7 @@ function collectItems(state: Pick<RoomState, "chats" | "transfers" | "selfId">):
       mine: t.dir === "out",
       sealed: t.sealed,
       groupId: t.groupId,
+      unreadableBy: t.unreadableBy,
       transfer: t,
     });
   }
@@ -144,6 +149,10 @@ export function buildTimeline(
       // file-starts carry the frame type they arrived as)
       sealed: parts.find((p) => p.sealed !== undefined)?.sealed,
       system: parts.some((p) => p.system),
+      // union of reporters across the group's text and file parts
+      unreadableBy: parts.some((p) => p.unreadableBy?.length)
+        ? [...new Set(parts.flatMap((p) => p.unreadableBy ?? []))]
+        : undefined,
     };
   });
 

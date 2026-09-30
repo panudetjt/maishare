@@ -53,6 +53,10 @@ import {
 const LONG_TEXT_CHARS = 600;
 const LONG_TEXT_LINES = 14;
 const COMPOSER_MAX_HEIGHT = 132;
+/** composer cap in UTF-16 chars — texts past the chat-frame cap (8000) send
+ * as an asText .txt instead; this stays under that path's 1 MiB byte ceiling
+ * even for 3-byte-per-char Thai */
+const COMPOSER_MAX_CHARS = 200_000;
 
 /** a file queued in the composer, sent together with the next message */
 export interface PendingFile {
@@ -299,12 +303,22 @@ export function Conversation({
   // that covers both late joiners and transfers cancelled by mistake
   const resendMessage = useCallback(
     (m: TimelineMessage) => {
+      // long texts arrived as asText .txt parts — fold their decoded text
+      // back into the message body so sendMessage re-routes it (as a fresh
+      // asText transfer once it again exceeds the chat-frame cap)
+      const longTexts = m.files.filter((f) => f.asText && f.text != null).map((f) => f.text!);
+      const text = [m.text ?? "", ...longTexts].filter(Boolean).join("\n\n");
       const files = m.files
-        .filter((f) => f.blob)
+        .filter((f) => f.blob && !f.asText)
         .map((f) => new File([f.blob!], f.name, { type: f.mime }));
-      if (!files.length) return;
-      client.sendMessage(m.text ?? "", files);
-      client.toast(`Resending ${files.length} ${files.length === 1 ? "file" : "files"}`, "success");
+      if (!text && !files.length) return;
+      client.sendMessage(text, files);
+      client.toast(
+        files.length
+          ? `Resending ${files.length} ${files.length === 1 ? "file" : "files"}`
+          : "Resending message",
+        "success",
+      );
     },
     [client],
   );
@@ -503,7 +517,7 @@ export function Conversation({
             ref={taRef}
             rows={1}
             value={draft}
-            maxLength={8000}
+            maxLength={COMPOSER_MAX_CHARS}
             placeholder="Type a message"
             aria-label="Message"
             onChange={(e) => {
@@ -579,6 +593,11 @@ function MessageBubble({
   const sending = message.files.some((f) => f.status === "queued" || f.status === "active");
   const resending = !sending && message.files.some((f) => f.blob);
   const savable = message.files.filter((f) => f.blob);
+  // caption + any long text that traveled as an asText part — one Copy grabs all
+  const copyable = [
+    ...(message.text != null ? [message.text] : []),
+    ...message.files.filter((f) => f.asText && f.text != null).map((f) => f.text!),
+  ].join("\n\n");
   return (
     <div className={`msg ${message.mine ? "msg-mine" : ""}`}>
       {message.firstOfGroup && (
@@ -597,6 +616,14 @@ function MessageBubble({
               {message.sealed ? <LockIcon size={12} /> : <LockOpenIcon size={12} />}
             </span>
           )}
+          {message.unreadableBy && message.unreadableBy.length > 0 && (
+            <span
+              className="msg-lock msg-warn"
+              title={`Not readable by ${message.unreadableBy.join(", ")} — they don't have the room key`}
+            >
+              ⚠
+            </span>
+          )}
         </div>
       )}
       <div className={`bubble ${message.system ? "bubble-system" : ""}`}>
@@ -604,7 +631,12 @@ function MessageBubble({
         {message.files.length > 0 && (
           <div className="bubble-files">
             {message.files.map((f) =>
-              f.mime.startsWith("image/") ? (
+              // a long text that traveled as a .txt renders back as a text
+              // part — until its bytes land there is no text, so it still
+              // shows as an ordinary (progressing) file card
+              f.asText && f.text != null ? (
+                <TextPart key={f.id} text={f.text} />
+              ) : f.mime.startsWith("image/") ? (
                 <ImageCell key={f.id} t={f} onOpen={onOpenImage} onCancel={onCancel} />
               ) : (
                 <FileRow key={f.id} t={f} onCancel={onCancel} />
@@ -615,10 +647,10 @@ function MessageBubble({
       </div>
       {!message.system && (
         <div className="msg-actions">
-          {message.text != null && (
+          {copyable && (
             <button
               type="button"
-              onClick={() => onCopy(message.text!)}
+              onClick={() => onCopy(copyable)}
               aria-label="Copy message"
               title="Copy"
             >
@@ -782,6 +814,16 @@ function FileRow({ t, onCancel }: { t: TransferView; onCancel: (id: string) => v
           <div className="progress">
             <div className="progress-bar" style={{ width: `${pct}%` }} />
           </div>
+        )}
+        {/* the wire says delivered, but a peer reported the sealed bytes as
+         * unreadable — never show a reassuring "sent" alone in that case */}
+        {t.status === "done" && t.unreadableBy?.length && (
+          <span
+            className="bubble-file-warn"
+            title={`Not readable by ${t.unreadableBy.join(", ")} — they don't have the room key`}
+          >
+            ⚠ unreadable to {t.unreadableBy.join(", ")}
+          </span>
         )}
       </div>
       <span className="bubble-actions">

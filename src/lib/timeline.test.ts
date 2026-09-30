@@ -44,6 +44,26 @@ describe("buildTimeline", () => {
     expect(t.map((m) => m.id)).toEqual(["c1", "t1", "c2"]);
   });
 
+  it("unions unreadableBy across the group's text and file parts", () => {
+    const t = buildTimeline(
+      state(
+        [chat("c1", 1000, "caption", true, "g1")],
+        [
+          transfer("t2", 1002, { groupId: "g1", unreadableBy: ["bob"] }),
+          transfer("t1", 1001, { groupId: "g1", unreadableBy: ["ana", "bob"] }),
+        ],
+      ),
+    );
+    expect(t).toHaveLength(1);
+    // union follows part order: t1's ["ana","bob"] first, then t2's ["bob"]
+    expect(t[0].unreadableBy).toEqual(["ana", "bob"]);
+  });
+
+  it("leaves unreadableBy unset when no part carries it", () => {
+    const t = buildTimeline(state([chat("c1", 1000, "plain")], []));
+    expect(t[0].unreadableBy).toBeUndefined();
+  });
+
   it("folds a text and its file batch into ONE message via groupId", () => {
     const t = buildTimeline(
       state(
