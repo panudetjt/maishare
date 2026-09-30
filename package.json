@@ -16,6 +16,7 @@
   "dependencies": {
     "@tanstack/react-router": "^1.95.0",
     "fflate": "^0.8.3",
+    "highlight.js": "^11.12.0",
     "jsqr": "^1.4.0",
     "photoswipe": "^5.4.4",
     "qrcode": "^1.5.4",

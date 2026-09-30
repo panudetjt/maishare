@@ -1062,11 +1062,132 @@ input::placeholder {
   border-color: rgba(248, 113, 113, 0.45);
   color: #fca5a5;
 }
-.bubble-clamped .bubble-line {
+.bubble-clamped .bubble-line,
+.bubble-clamped .bubble-code-body {
   max-height: 180px;
   overflow: hidden;
   -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
   mask-image: linear-gradient(180deg, #000 70%, transparent);
+}
+
+/* code bubbles: Magika-detected source text rendered with highlight.js
+   (grammar chunks load on demand — the block may briefly start plain) */
+.bubble-code {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(11, 13, 18, 0.55);
+  overflow: hidden;
+}
+.msg-mine .bubble-code {
+  background: rgba(11, 13, 18, 0.42);
+}
+.bubble-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.bubble-code-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  border: none;
+  background: none;
+  color: var(--dim);
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.bubble-code-copy:hover {
+  color: var(--text);
+  background: var(--bg2);
+}
+.bubble-code-body {
+  margin: 0;
+  padding: 8px 12px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #c9d2e3;
+}
+.bubble-code-body code {
+  font: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+  white-space: pre;
+}
+
+/* highlight.js token colors — a small theme tuned to the app palette */
+.hljs-comment,
+.hljs-quote {
+  color: var(--dim);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-literal,
+.hljs-doctag {
+  color: #c4b5fd;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-template-variable,
+.hljs-char.escape_ {
+  color: #86efac;
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-meta .hljs-keyword {
+  color: var(--warn);
+}
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #7dd3fc;
+}
+.hljs-built_in,
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-attr,
+.hljs-attribute {
+  color: #a5b4fc;
+}
+.hljs-variable,
+.hljs-operator,
+.hljs-punctuation {
+  color: #e0e6f1;
+}
+.hljs-meta,
+.hljs-link {
+  color: var(--accent2);
+}
+.hljs-deletion {
+  color: var(--err);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
 }
 
 /* file rows inside a message bubble */

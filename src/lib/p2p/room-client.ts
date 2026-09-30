@@ -1,5 +1,12 @@
 import { platformLabel, uuid } from "../device";
-import { resolveMime, sniffBlob, sniffBytes, suspiciousMismatch, type SniffInfo } from "../magika";
+import {
+  resolveMime,
+  sniffBlob,
+  sniffBytes,
+  sniffText,
+  suspiciousMismatch,
+  type SniffInfo,
+} from "../magika";
 import { concatFrame, decoder, encoder, ENC_OVERHEAD, FRAME, type Control } from "./protocol";
 import { MAX_STREAMABLE_SIZE, pickIncomingSink, type IncomingSink } from "./spill";
 import { RoomCipher } from "./crypto";
@@ -112,6 +119,9 @@ export interface ChatMsg {
   /** names of peers that reported this message back as unreadable — they
    * received a sealed copy without holding the room key */
   unreadableBy?: string[];
+  /** content-derived type from Magika (pasted-code detection) — absent until
+   * the sniff lands or when it was skipped as unlikely code */
+  detected?: SniffInfo;
 }
 
 export type TransferStatus = "queued" | "active" | "done" | "error" | "cancelled";
@@ -472,6 +482,18 @@ export class RoomClient {
     this.schedule();
   }
 
+  /** sniff a chat text for code content (Magika) and patch the stored message
+   * in place. sniffText gates on a cheap plausibility check first, so casual
+   * chat never even loads the wasm. The message may have left the retained
+   * list by the time the sniff lands — patching an orphan is harmless. */
+  private sniffChatText(msg: ChatMsg) {
+    void sniffText(msg.text).then((info) => {
+      if (this.disposed || !info) return;
+      msg.detected = info;
+      this.schedule();
+    });
+  }
+
   sendChat(text: string, groupId?: string) {
     const t = text.trim();
     if (!t) return;
@@ -493,6 +515,7 @@ export class RoomClient {
     };
     this.chats = [...this.chats, msg];
     this.capChats();
+    this.sniffChatText(msg);
     this.schedule();
     const frame: Control = { t: "chat", id: msg.id, text: t, at: msg.at, g: groupId };
     if (openPeers.length) {
@@ -1464,9 +1487,8 @@ export class RoomClient {
         // frames can neither grow memory unbounded nor outpace manual Clear.
         // Applies to plaintext frames regardless of the room key (wrong-key
         // members are bounded identically).
-        this.chats = [
-          ...this.chats,
-          {
+        {
+          const msg: ChatMsg = {
             id: typeof c.id === "string" ? c.id : rid(),
             peerId: ctx.peerId,
             name: ctx.name,
@@ -1475,9 +1497,11 @@ export class RoomClient {
             mine: false,
             groupId: c.g,
             sealed,
-          },
-        ];
-        this.capChats();
+          };
+          this.chats = [...this.chats, msg];
+          this.capChats();
+          this.sniffChatText(msg);
+        }
         this.schedule();
         break;
       case "undecryptable": {

@@ -87,6 +87,23 @@ export async function sniffBlob(blob: Blob): Promise<SniffInfo | null> {
   return sniffBytes(new Uint8Array(head));
 }
 
+/** chat texts shorter than this are never worth a wasm round-trip */
+const MIN_TEXT_SNIFF_CHARS = 40;
+
+/**
+ * Identify a chat text (pasted code being the use case). The wasm only loads
+ * for texts that plausibly carry code — long enough to classify and
+ * multi-line (or JSON-shaped) — so everyday one-liner chat never pays the
+ * 3 MB load. Returns null when the gate skips the sniff.
+ */
+export async function sniffText(text: string): Promise<SniffInfo | null> {
+  const plausible =
+    text.length >= MIN_TEXT_SNIFF_CHARS && (/[\n\r]/.test(text) || /^\s*[[{]/.test(text));
+  if (!plausible) return null;
+  const bytes = new TextEncoder().encode(text).slice(0, HEAD_BYTES);
+  return sniffBytes(bytes);
+}
+
 /**
  * The mime to actually use: browser-claimed type refined by content. A
  * confident sniff fills in generic/empty claims; a very confident one

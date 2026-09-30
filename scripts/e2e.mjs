@@ -179,6 +179,27 @@ try {
   await bob.page.locator(".msg-lock.is-sealed").first().waitFor({ timeout: 5000 });
   ok("sealed messages show the closed lock", true);
 
+  // ---- pasted code: the magika sniff drives a highlighted code bubble ----
+  const pySnippet = [
+    "def greet(name):",
+    '    print(f"hello {name}")',
+    "    return None",
+    "",
+    "",
+    "greet('bob')",
+  ].join("\n");
+  await alice.page.getByRole("textbox", { name: "Message" }).fill(pySnippet);
+  await alice.page.getByRole("button", { name: "Send", exact: true }).click();
+  await bob.page.locator(".bubble-code", { hasText: "greet" }).waitFor({ timeout: 20_000 });
+  ok("code bubble renders for a pasted snippet", true);
+  await bob.page.locator(".bubble-code-lang", { hasText: "python" }).waitFor({ timeout: 10_000 });
+  ok("code bubble names the detected language", true);
+  await bob.page.locator(".bubble-code .hljs-keyword").first().waitFor({ timeout: 10_000 });
+  ok("code bubble is syntax highlighted", true);
+  await alice.page.locator(".bubble-code .hljs-keyword").first().waitFor({ timeout: 10_000 });
+  ok("sender's own code bubble highlights too", true);
+  screenshots.push(await bob.page.screenshot({ path: "/tmp/maishare-code-bubble.png" }));
+
   // copy a received message back out from under its bubble
   await bob.page
     .locator(".msg", { hasText: "hello from alice" })

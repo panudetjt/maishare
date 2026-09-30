@@ -15,11 +15,13 @@ import { rewriteShareHtml } from "./share-html";
  * X-Frame-Options block clickjacking embeds; referrer-policy keeps query
  * strings (the invite key) out of cross-origin referrers. The app needs no
  * inline scripts and no third-party origins, so the policy is tight — inline
- * STYLES stay allowed (React/PhotoSwipe inject style attributes).
+ * STYLES stay allowed (React/PhotoSwipe inject style attributes), and
+ * 'wasm-unsafe-eval' keeps the Magika content-sniffing wasm working without
+ * opening the door to eval().
  */
 const HTML_SECURITY_HEADERS: Record<string, string> = {
   "content-security-policy":
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data: blob:; media-src 'self' blob:; " +
     "connect-src 'self' blob: ws: wss:; " +
     "worker-src 'self'; manifest-src 'self'; font-src 'self'; object-src 'none'; " +

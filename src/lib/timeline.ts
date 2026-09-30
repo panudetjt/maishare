@@ -5,6 +5,7 @@
 // without React.
 
 import type { ChatMsg, RoomState, TransferView } from "./p2p/room-client";
+import type { SniffInfo } from "./magika";
 
 /** consecutive messages from one author within this gap share a group */
 export const GROUP_GAP_MS = 5 * 60 * 1000;
@@ -20,6 +21,8 @@ export interface TimelineMessage {
   firstOfDay: boolean;
   firstOfGroup: boolean;
   text: string | null;
+  /** Magika sniff of the text part — drives the code-bubble render */
+  textDetected?: SniffInfo;
   files: TransferView[];
   /** arrived sealed with the room key (false = DTLS only, undefined = unknown) */
   sealed: boolean | undefined;
@@ -59,6 +62,7 @@ interface Item {
   peerName: string;
   mine: boolean;
   text?: string;
+  detected?: SniffInfo;
   system?: boolean;
   sealed?: boolean;
   groupId?: string;
@@ -77,6 +81,7 @@ function collectItems(state: Pick<RoomState, "chats" | "transfers" | "selfId">):
       peerName: m.name,
       mine: m.mine,
       text: m.text,
+      detected: m.detected,
       system: m.system,
       sealed: m.sealed,
       groupId: m.groupId,
@@ -144,6 +149,7 @@ export function buildTimeline(
       firstOfDay: false,
       firstOfGroup: false,
       text: text?.text ?? null,
+      textDetected: text?.detected,
       files,
       // one truth per message: first part that actually knows wins (text and
       // file-starts carry the frame type they arrived as)

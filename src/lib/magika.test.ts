@@ -7,6 +7,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   resolveMime,
   sniffBytes,
+  sniffText,
   suspiciousMismatch,
   withDetectedExtension,
   type SniffInfo,
@@ -190,5 +191,26 @@ describe("magika wasm parity", () => {
 
   it("returns null for empty input instead of calling the model", async () => {
     expect(await sniffBytes(new Uint8Array(0))).toBeNull();
+  });
+});
+
+describe("sniffText", () => {
+  it("identifies pasted code through the async loader", async () => {
+    const py = "def greet(name):\n    print(f\"hello {name}\")\n    return None\n\n\ngreet('x')\n";
+    const sniffed = await sniffText(py);
+    expect(sniffed?.label).toBe("python");
+    expect(sniffed?.group).toBe("code");
+  });
+
+  it("skips the sniff for short or single-line chat", async () => {
+    expect(await sniffText("x = 1")).toBeNull();
+    expect(await sniffText("let x = 1; doSomethingWith(x); finishEverything();")).toBeNull();
+    expect(await sniffText("tiny\nmsg")).toBeNull();
+  });
+
+  it("still classifies multi-line prose (as plain text, not code)", async () => {
+    const chat = "เดี๋ยววันนี้เราคุยกันเรื่อง\nการ deploy ระบบใหม่ก่อนนะครับ\nแล้วค่อยไปดูบั๊กต่อ";
+    const sniffed = await sniffText(chat);
+    expect(sniffed?.group).not.toBe("code");
   });
 });

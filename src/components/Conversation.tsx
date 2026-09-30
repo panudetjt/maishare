@@ -13,7 +13,8 @@ import PhotoSwipeLightbox from "photoswipe/lightbox";
 import "photoswipe/style.css";
 import type { RoomClient, RoomState, TransferView } from "../lib/p2p/room-client";
 import { buildTimeline, dayLabel, type TimelineMessage } from "../lib/timeline";
-import { withDetectedExtension } from "../lib/magika";
+import { withDetectedExtension, type SniffInfo } from "../lib/magika";
+import { codeLanguage, highlightCode, isCodeText } from "../lib/highlight";
 import { formatBytes, formatClock, formatSpeed } from "../lib/format";
 import {
   ArrowDown,
@@ -627,7 +628,9 @@ function MessageBubble({
         </div>
       )}
       <div className={`bubble ${message.system ? "bubble-system" : ""}`}>
-        {message.text != null && <TextPart text={message.text} />}
+        {message.text != null && (
+          <TextPart text={message.text} detected={message.textDetected} onCopy={onCopy} />
+        )}
         {message.files.length > 0 && (
           <div className="bubble-files">
             {message.files.map((f) =>
@@ -635,7 +638,7 @@ function MessageBubble({
               // part — until its bytes land there is no text, so it still
               // shows as an ordinary (progressing) file card
               f.asText && f.text != null ? (
-                <TextPart key={f.id} text={f.text} />
+                <TextPart key={f.id} text={f.text} detected={f.detected} onCopy={onCopy} />
               ) : f.mime.startsWith("image/") ? (
                 <ImageCell key={f.id} t={f} onOpen={onOpenImage} onCancel={onCancel} />
               ) : (
@@ -683,12 +686,24 @@ function MessageBubble({
   );
 }
 
-function TextPart({ text }: { text: string }) {
+function TextPart({
+  text,
+  detected,
+  onCopy,
+}: {
+  text: string;
+  detected?: SniffInfo;
+  onCopy?: (text: string) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const huge = text.length > LONG_TEXT_CHARS || text.split("\n").length > LONG_TEXT_LINES;
   return (
     <div className={`bubble-text-part ${huge && !expanded ? "bubble-clamped" : ""}`}>
-      <div className="bubble-line">{text}</div>
+      {isCodeText(detected) ? (
+        <CodeBlock text={text} detected={detected} onCopy={onCopy} />
+      ) : (
+        <div className="bubble-line">{text}</div>
+      )}
       {huge && (
         <button
           type="button"
@@ -698,6 +713,53 @@ function TextPart({ text }: { text: string }) {
           {expanded ? "Show less" : "Show more"}
         </button>
       )}
+    </div>
+  );
+}
+
+/** code text rendered as a highlighted block — the grammar chunk loads on
+ * demand, so the block starts as plain monospace and swaps once the
+ * highlighted HTML lands (or stays plain if it never does) */
+function CodeBlock({
+  text,
+  detected,
+  onCopy,
+}: {
+  text: string;
+  detected: SniffInfo;
+  onCopy?: (text: string) => void;
+}) {
+  const [html, setHtml] = useState<string | null>(null);
+  const lang = codeLanguage(detected) ?? "code";
+  useEffect(() => {
+    let alive = true;
+    void highlightCode(text, detected).then((value) => {
+      if (alive && value) setHtml(value);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [text, detected]);
+  return (
+    <div className="bubble-code">
+      <div className="bubble-code-head">
+        <span className="bubble-code-lang">{lang}</span>
+        {onCopy && (
+          <button
+            type="button"
+            className="bubble-code-copy"
+            onClick={() => onCopy(text)}
+            aria-label="Copy code"
+            title="Copy code"
+          >
+            <CopyIcon size={12} />
+          </button>
+        )}
+      </div>
+      <pre className="bubble-code-body">
+        {/* hljs output is escaped — the only injected HTML is its own */}
+        {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{text}</code>}
+      </pre>
     </div>
   );
 }
