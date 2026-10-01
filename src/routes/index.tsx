@@ -3,6 +3,7 @@ import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { z } from "zod";
 import { loadName, makeRoomCode, makeRoomKey, saveName } from "../lib/device";
 import { useLanRooms } from "../lib/discovery";
+import { keyFromHash, roomInvitePath } from "../lib/invite";
 import { clearRecents, loadRecents, type Recent } from "../lib/recents";
 import { registerHomeTools } from "../lib/p2p/webmcp";
 import { Bolt, Logo, QrIcon, TrashIcon, UsersIcon, WifiIcon } from "../components/Icons";
@@ -70,7 +71,7 @@ function HomeComponent() {
         if (!m) return null;
         // NV-03: new invites carry the key in the fragment; legacy ?k= links
         // still parse and are migrated to fragments by the room route
-        const hashK = u.hash.startsWith("#k=") ? decodeURIComponent(u.hash.slice(3)) : undefined;
+        const hashK = keyFromHash(u.hash);
         return { roomId: m[1], k: hashK ?? u.searchParams.get("k") ?? undefined };
       } catch {
         return null;
@@ -180,30 +181,30 @@ function HomeComponent() {
                 </button>
               </div>
               <ul className="recent-list">
-                {recents.map((r) => {
-                  const hash = r.k ? `#k=${encodeURIComponent(r.k)}` : "";
-                  return (
-                    <li key={r.roomId}>
-                      <a
-                        className="recent-chip"
-                        href={`/r/${r.roomId}${hash}`}
-                        onClick={(e) => {
-                          if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                          e.preventDefault();
-                          void navigate({
-                            to: "/r/$roomId",
-                            params: { roomId: r.roomId },
-                            search: {},
-                            ...(r.k ? { hash } : {}),
-                          });
-                        }}
-                      >
-                        <QrIcon size={14} />
-                        <code>{r.roomId}</code>
-                      </a>
-                    </li>
-                  );
-                })}
+                {recents.map((r) => (
+                  <li key={r.roomId}>
+                    <a
+                      className="recent-chip"
+                      href={roomInvitePath(r.roomId, r.k)}
+                      onClick={(e) => {
+                        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                        e.preventDefault();
+                        void navigate({
+                          to: "/r/$roomId",
+                          params: { roomId: r.roomId },
+                          search: {},
+                          // the router prepends '#' itself — pass the bare
+                          // `k=…` string or the fragment doubles (`##k=…`)
+                          // and the key becomes unfindable
+                          ...(r.k ? { hash: `k=${encodeURIComponent(r.k)}` } : {}),
+                        });
+                      }}
+                    >
+                      <QrIcon size={14} />
+                      <code>{r.roomId}</code>
+                    </a>
+                  </li>
+                ))}
               </ul>
             </div>
           ) : null}

@@ -196,61 +196,72 @@ try {
   // ---- nearby direct mode: paste-code path (offline flow, no signaling) ----
   // Headless has no camera, so this drives the manual-paste fallback, which is
   // the exact same handshake the QR scan feeds. The flow lives in a home-page
-  // card that expands in place.
-  const n1 = await newPeer(browser);
-  await n1.page.goto(BASE, { waitUntil: "domcontentloaded" });
-  await n1.page.getByRole("button", { name: /start nearby share/i }).click();
-  await n1.page.getByRole("button", { name: /send to a nearby device/i }).click();
-  await n1.page.locator(".nearby-code").waitFor({ timeout: 15_000 });
-  const offerCode = (await n1.page.locator(".nearby-code").innerText()).trim();
+  // card that expands in place. SKIP_NEARBY=1 skips the section — the direct
+  // WebRTC transfer it drives is environment-flaky under some headless-Chrome
+  // setups (handshake passes, bulk transfer stalls); the room flow covers the
+  // same Conversation pipeline.
+  if (process.env.SKIP_NEARBY === "1") {
+    console.log("SKIP nearby section (SKIP_NEARBY=1)");
+  } else {
+    const n1 = await newPeer(browser);
+    await n1.page.goto(BASE, { waitUntil: "domcontentloaded" });
+    await n1.page.getByRole("button", { name: /start nearby share/i }).click();
+    await n1.page.getByRole("button", { name: /send to a nearby device/i }).click();
+    await n1.page.locator(".nearby-code").waitFor({ timeout: 15_000 });
+    const offerCode = (await n1.page.locator(".nearby-code").innerText()).trim();
 
-  const n2 = await newPeer(browser);
-  await n2.page.goto(BASE, { waitUntil: "domcontentloaded" });
-  await n2.page.getByRole("button", { name: /start nearby share/i }).click();
-  await n2.page.getByRole("button", { name: /scan a share code/i }).click();
-  await n2.page.getByLabel("Paste a share code").fill(offerCode);
-  await n2.page.getByRole("button", { name: /use code/i }).click();
-  await n2.page.locator(".nearby-code").waitFor({ timeout: 15_000 });
-  const answerCode = (await n2.page.locator(".nearby-code").innerText()).trim();
-  ok("nearby offer/answer codes exchanged", answerCode.startsWith("ms1"), offerCode.length);
+    const n2 = await newPeer(browser);
+    await n2.page.goto(BASE, { waitUntil: "domcontentloaded" });
+    await n2.page.getByRole("button", { name: /start nearby share/i }).click();
+    await n2.page.getByRole("button", { name: /scan a share code/i }).click();
+    await n2.page.getByLabel("Paste a share code").fill(offerCode);
+    await n2.page.getByRole("button", { name: /use code/i }).click();
+    await n2.page.locator(".nearby-code").waitFor({ timeout: 15_000 });
+    const answerCode = (await n2.page.locator(".nearby-code").innerText()).trim();
+    ok("nearby offer/answer codes exchanged", answerCode.startsWith("ms1"), offerCode.length);
 
-  await n1.page.getByLabel("Paste a share code").fill(answerCode);
-  await n1.page.getByRole("button", { name: /use code/i }).click();
-  await n1.page.getByText(/connected to/i).waitFor({ timeout: 20_000 });
-  await n2.page.getByText(/connected to/i).waitFor({ timeout: 20_000 });
-  ok("nearby devices connected directly", true);
+    await n1.page.getByLabel("Paste a share code").fill(answerCode);
+    await n1.page.getByRole("button", { name: /use code/i }).click();
+    await n1.page.getByText(/connected to/i).waitFor({ timeout: 20_000 });
+    await n2.page.getByText(/connected to/i).waitFor({ timeout: 20_000 });
+    ok("nearby devices connected directly", true);
 
-  // files go through the same pending-attachment composer as rooms
-  const nearbyPayload = `maishare nearby payload ${Date.now()}\n`.repeat(1000); // ~27 KB
-  await n1.page.setInputFiles("input[type=file]", {
-    name: "nearby-payload.txt",
-    mimeType: "text/plain",
-    buffer: Buffer.from(nearbyPayload),
-  });
-  await n1.page
-    .locator(".attach-chip", { hasText: "nearby-payload.txt" })
-    .waitFor({ timeout: 5000 });
-  await n1.page.getByRole("button", { name: "Send", exact: true }).click();
-  await n2.page.locator(".transfer-done").first().waitFor({ timeout: 30_000 });
-  ok("nearby file received", true);
-  const [nbDownload] = await Promise.all([
-    n2.page.waitForEvent("download", { timeout: 10_000 }),
-    n2.page.getByRole("link", { name: /save/i }).click(),
-  ]);
-  const nbPath = `/tmp/maishare-nb-${nbDownload.suggestedFilename()}`;
-  await nbDownload.saveAs(nbPath);
-  const { readFile: nbReadFile } = await import("node:fs/promises");
-  const nbContent = await nbReadFile(nbPath, "utf8");
-  ok("nearby file matches byte-for-byte", nbContent === nearbyPayload, `${nbContent.length} bytes`);
+    // files go through the same pending-attachment composer as rooms
+    const nearbyPayload = `maishare nearby payload ${Date.now()}\n`.repeat(1000); // ~27 KB
+    await n1.page.setInputFiles("input[type=file]", {
+      name: "nearby-payload.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from(nearbyPayload),
+    });
+    await n1.page
+      .locator(".attach-chip", { hasText: "nearby-payload.txt" })
+      .waitFor({ timeout: 5000 });
+    await n1.page.getByRole("button", { name: "Send", exact: true }).click();
+    await n2.page.locator(".transfer-done").first().waitFor({ timeout: 30_000 });
+    ok("nearby file received", true);
+    const [nbDownload] = await Promise.all([
+      n2.page.waitForEvent("download", { timeout: 10_000 }),
+      n2.page.getByRole("link", { name: /save/i }).click(),
+    ]);
+    const nbPath = `/tmp/maishare-nb-${nbDownload.suggestedFilename()}`;
+    await nbDownload.saveAs(nbPath);
+    const { readFile: nbReadFile } = await import("node:fs/promises");
+    const nbContent = await nbReadFile(nbPath, "utf8");
+    ok(
+      "nearby file matches byte-for-byte",
+      nbContent === nearbyPayload,
+      `${nbContent.length} bytes`,
+    );
 
-  // and the chat composer is the same Conversation component rooms use
-  await n1.page.getByRole("textbox", { name: "Message" }).fill("nearby hello");
-  await n1.page.getByRole("button", { name: "Send", exact: true }).click();
-  await n2.page.getByText("nearby hello").waitFor({ timeout: 10_000 });
-  ok("nearby chat works via the room panel", true);
+    // and the chat composer is the same Conversation component rooms use
+    await n1.page.getByRole("textbox", { name: "Message" }).fill("nearby hello");
+    await n1.page.getByRole("button", { name: "Send", exact: true }).click();
+    await n2.page.getByText("nearby hello").waitFor({ timeout: 10_000 });
+    ok("nearby chat works via the room panel", true);
 
-  await n1.ctx.close();
-  await n2.ctx.close();
+    await n1.ctx.close();
+    await n2.ctx.close();
+  } // end nearby section (SKIP_NEARBY guard)
 
   // ---- peer B joins via the invite link (name travels in the URL) ----
   const bob = await newPeer(browser);
@@ -258,8 +269,10 @@ try {
   bobUrl.searchParams.set("name", "bob");
   await bob.page.goto(bobUrl.href, { waitUntil: "domcontentloaded" });
 
-  // mesh: each side should list the other once the data channel opens
-  await bob.page.getByText("alice", { exact: true }).waitFor({ timeout: 15_000 });
+  // mesh: each side should list the other once the data channel opens.
+  // the name and the host badge share .peer-name, so match hasText — an
+  // exact-text "alice" locator went stale when the host tag moved inside it
+  await bob.page.locator(".peer-name", { hasText: "alice" }).first().waitFor({ timeout: 15_000 });
   await alice.page.locator(".peer-list li.peer").nth(1).waitFor({ timeout: 15_000 });
   ok("peers see each other", true);
 

@@ -22,8 +22,12 @@ export function loadRecents(): Recent[] {
 
 export function addRecent(r: Recent) {
   try {
-    const list = loadRecents().filter((x) => x.roomId !== r.roomId);
-    list.unshift(r);
+    const stored = loadRecents();
+    const list = stored.filter((x) => x.roomId !== r.roomId);
+    // a keyless landing (bare LAN link, or a key-offer still pending) keeps
+    // the key this device already holds — only a fresh invite replaces it
+    const k = r.k ?? stored.find((x) => x.roomId === r.roomId)?.k;
+    list.unshift(k ? { ...r, k } : r);
     localStorage.setItem(KEY, JSON.stringify(list.slice(0, MAX)));
   } catch {}
 }

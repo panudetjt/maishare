@@ -10,6 +10,7 @@ import { useRoom } from "../lib/p2p/use-room";
 import type { ConsentRequest } from "../lib/p2p/room-client";
 import { registerRoomTools } from "../lib/p2p/webmcp";
 import { loadName, saveName, uuid } from "../lib/device";
+import { keyFromHash, roomInvitePath } from "../lib/invite";
 import { addRecent } from "../lib/recents";
 import { Conversation, type PendingFile } from "../components/Conversation";
 import { PeerList } from "../components/PeerList";
@@ -41,11 +42,11 @@ export const Route = createFileRoute("/r/$roomId")({
   component: RoomRoute,
 });
 
-/** NV-03: the invite key rides the fragment (#k=…) — server-invisible */
+/** NV-03: the invite key rides the fragment (#k=…) — server-invisible.
+ * keyFromHash also heals the double-`#` links the old recents bug produced. */
 function readKeyFromHash(): string | undefined {
   if (typeof location === "undefined") return undefined;
-  const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
-  return hash.get("k") ?? undefined;
+  return keyFromHash(location.hash);
 }
 
 function RoomRoute() {
@@ -77,7 +78,7 @@ function RoomRoute() {
   // NOT rebuilt: it already holds the cipher)
   const effectiveKey = key ?? state.selfKey ?? undefined;
 
-  const inviteUrl = `${location.origin}/r/${roomId}${effectiveKey ? `#k=${encodeURIComponent(effectiveKey)}` : ""}`;
+  const inviteUrl = `${location.origin}${roomInvitePath(roomId, effectiveKey)}`;
 
   // repair the URL fragment once a key is acquired, so reloads and invites
   // carry the full key without rebuilding the running client
