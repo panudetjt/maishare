@@ -799,6 +799,23 @@ export class RoomClient {
     this.schedule();
   }
 
+  /** the host removes a member from the room. The server enforces host
+   * authority (a non-host ask is a no-op); the target gets `kicked` + a 4403
+   * close, everyone else a peer-leave. Locally we drop the peer immediately
+   * so the roster updates without waiting for the round-trip. */
+  kickPeer(peerId: string) {
+    const ctx = this.peers.get(peerId);
+    if (ctx) {
+      // frames we sealed to this peer are unreadable to it once it is gone —
+      // same ledger treatment as a key-share denial
+      this.stampSealedLedger(ctx);
+      this.removePeer(ctx);
+      this.toast(`Removed ${ctx.name} from the room`);
+    }
+    this.sig.send({ t: "kick", peerId });
+    this.schedule();
+  }
+
   toast(msg: string, kind: Toast["kind"] = "info") {
     const t: Toast = { id: this.toastSeq++, msg, kind };
     this.toasts = [...this.toasts, t];
@@ -1442,10 +1459,9 @@ export class RoomClient {
         if (this.cipher)
           this.cipher.open(body).then(
             (pt) => this.onControl(ctx, JSON.parse(decoder.decode(pt)) as Control, true),
-            () => this.notifyUndecryptable(ctx, "sealed"),
+            () => this.onSealedOpenFail(ctx),
           );
-        else if (ctx.challengeSeen) this.notifyUndecryptable(ctx, "sealed");
-        else ctx.challengeSeen = true; // the sealed challenge ping — expected
+        else this.onSealedOpenFail(ctx);
         break;
       case FRAME.CHUNK:
         this.onChunk(ctx, body);
@@ -1454,13 +1470,21 @@ export class RoomClient {
         if (this.cipher)
           this.cipher.open(body).then(
             (pt) => this.onChunk(ctx, pt),
-            () => this.notifyUndecryptable(ctx, "sealed", "chunk"),
+            () => this.onSealedOpenFail(ctx, "chunk"),
           );
         // keyless: the challenge absorption covers the first frame here too
-        else if (ctx.challengeSeen) this.notifyUndecryptable(ctx, "sealed", "chunk");
-        else ctx.challengeSeen = true;
+        else this.onSealedOpenFail(ctx, "chunk");
         break;
     }
+  }
+
+  /** the first sealed frame of any connection is provably the proof-challenge
+   * ping — hello is plain and always precedes sealed traffic — so its failure
+   * is the designed join state (keyless OR holding a wrong key), never a lost
+   * message. Every later failure warns and reports once per connection. */
+  private onSealedOpenFail(ctx: PeerCtx, kind: "frame" | "chunk" = "frame") {
+    if (ctx.challengeSeen) this.notifyUndecryptable(ctx, "sealed", kind);
+    else ctx.challengeSeen = true;
   }
 
   private capChats() {
@@ -1486,9 +1510,14 @@ export class RoomClient {
           }
         } else if (c.keyed === true && !ctx.keyRequested) {
           // we hold no key but a keyed peer appeared — ask for a share, but
-          // only where the room policy allows the ask (SEC-11: the host by
+          // only where the room policy allows the ask AND we could ever prove
+          // possession: a WebCrypto-incapable joiner is the SEC-01 consent
+          // flow's guest, never a key-share candidate (SEC-11: the host by
           // default; anyone when the room opted in; no announcement = anyone)
-          if (this.keyShare === "anyone" || this.hostId == null || ctx.peerId === this.hostId) {
+          if (
+            hasCrypto() &&
+            (this.keyShare === "anyone" || this.hostId == null || ctx.peerId === this.hostId)
+          ) {
             ctx.keyRequested = true;
             void this.sendControl(ctx, { t: "key-request" }, "plain");
             this.toast("Asked the room for its key — waiting for approval", "info");
@@ -1501,7 +1530,9 @@ export class RoomClient {
         break;
       case "key-request": {
         // a keyless joiner wants in — one approval gate per connection,
-        // only answerable while we actually hold the key
+        // only answerable while we actually hold the key. (Incapable peers
+        // never ask — the ask side gates on hasCrypto() — so a request
+        // arriving here implies a peer that could still one day prove.)
         if (
           this.cipher &&
           !ctx.keyShareDecided &&
@@ -1855,6 +1886,20 @@ export class RoomClient {
     const v = inc.view;
     const secs = (performance.now() - inc.startedAt) / 1000;
     v.speed = secs > 0 ? v.bytes / secs : 0;
+    if (v.bytes < v.size) {
+      // the sender's end-frame arrived short — chunks were lost (a phone
+      // browser suspended mid-transfer is the classic case). A silently
+      // "received" empty file is worse than an honest failure: settle as
+      // error so nothing ever renders as a blank bubble or a dead download.
+      v.status = "error";
+      inc.sink.abort();
+      this.toast(
+        `"${v.name}" arrived incomplete (${v.bytes} of ${v.size} bytes) — ask the sender to resend`,
+        "error",
+      );
+      this.schedule();
+      return;
+    }
     // done the moment the wire says so — the sniff and blob assembly below
     // only attach metadata; the counter keeps bytes actually received and
     // is never rewritten to the claim
@@ -1864,21 +1909,12 @@ export class RoomClient {
   }
 
   private async verifyIncoming(v: TransferView, sink: IncomingSink) {
-    const info = await sniffBytes(sink.head());
-    if (this.disposed || !this.transfers.includes(v)) {
-      sink.abort();
-      return;
-    }
-    if (info) {
-      v.detected = info;
-      v.mime = resolveMime(v.mime, info);
-      const warn = suspiciousMismatch(v.name, info);
-      if (warn) this.toast(warn, "error");
-    }
+    // data first: the blob and any inline text must land even when the sniff
+    // below stalls or fails — detection is a metadata upgrade, never a gate
+    // on the payload
     try {
-      // RAM sink: an in-memory Blob; disk sink: the OPFS-backed File itself,
-      // so multi-GB results stream from disk instead of living in heap
       const blob = await sink.finish();
+      if (this.disposed || !this.transfers.includes(v)) return;
       v.blob = blob;
       v.blobUrl = URL.createObjectURL(blob);
       // long-text message: pull the bubble's string out of the finished blob
@@ -1888,8 +1924,22 @@ export class RoomClient {
       v.status = "error";
       sink.abort();
       this.toast(`"${v.name}" could not be stored — transfer failed`, "error");
+      this.schedule();
+      return;
     }
     this.schedule();
+    // metadata upgrade: content sniff (magika.ts drops its memo on a failed
+    // load, so the next transfer retries). A null sniff just leaves the
+    // browser-derived mime and the plain render.
+    const info = await sniffBytes(sink.head());
+    if (this.disposed || !this.transfers.includes(v)) return;
+    if (info) {
+      v.detected = info;
+      v.mime = resolveMime(v.mime, info);
+      const warn = suspiciousMismatch(v.name, info);
+      if (warn) this.toast(warn, "error");
+      this.schedule();
+    }
   }
 
   // ---- sending (single active file per connection, chat interleaves) ----

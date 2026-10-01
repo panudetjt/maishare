@@ -9,6 +9,7 @@ import { registerHomeTools } from "../lib/p2p/webmcp";
 import { Bolt, Logo, QrIcon, TrashIcon, UsersIcon, WifiIcon } from "../components/Icons";
 import { InstallButton } from "../components/InstallPrompt";
 import { NearbyShare } from "../components/NearbyShare";
+import { QrScanner } from "../components/QrScanner";
 
 const indexSearchSchema = z.object({
   name: z.string().trim().max(32).optional().catch(undefined),
@@ -30,6 +31,10 @@ function HomeComponent() {
   const navigate = useNavigate({ from: Route.fullPath });
   const [name, setName] = useState(search.name ?? loadName());
   const [joinValue, setJoinValue] = useState("");
+  const [scanOpen, setScanOpen] = useState(false);
+  // remounts the scanner after a rejected code — a captured frame stops its loop
+  const [scanNonce, setScanNonce] = useState(0);
+  const [scanError, setScanError] = useState("");
   const [recents, setRecents] = useState<Recent[]>(initialRecents);
   const [nearbyOpen, setNearbyOpen] = useState(false);
   // SEC-11: by default only the room host answers key-share requests; the
@@ -82,18 +87,30 @@ function HomeComponent() {
     return m ? { roomId: m[1] } : null;
   }
 
-  function joinRoom() {
-    const parsed = parseInvite(joinValue);
-    if (!parsed) {
-      setJoinValue("");
-      return;
-    }
+  function joinWithInvite(v: string): boolean {
+    const parsed = parseInvite(v);
+    if (!parsed) return false;
     void navigate({
       to: "/r/$roomId",
       params: { roomId: parsed.roomId },
       search: { name },
       ...(parsed.k ? { hash: `k=${encodeURIComponent(parsed.k)}` } : {}),
     });
+    return true;
+  }
+
+  function joinRoom() {
+    if (!joinWithInvite(joinValue)) setJoinValue("");
+  }
+
+  function onScanResult(code: string) {
+    if (joinWithInvite(code)) {
+      setScanError("");
+      setScanOpen(false);
+      return;
+    }
+    setScanNonce((n) => n + 1);
+    setScanError("That QR code isn’t a maishare invite.");
   }
 
   return (
@@ -146,7 +163,7 @@ function HomeComponent() {
 
         <section className="panel home-card">
           <h2>Join a room</h2>
-          <p className="muted">Paste an invite link, or type the room code.</p>
+          <p className="muted">Paste an invite link, type the room code, or scan the host’s QR.</p>
           <form
             className="join-form"
             onSubmit={(e) => {
@@ -160,10 +177,45 @@ function HomeComponent() {
               placeholder="e.g. k7m2xq or http://192.168.1.20:8787/r/k7m2xq?k=…"
               aria-label="Room code or invite link"
             />
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setScanError("");
+                setScanOpen((v) => !v);
+              }}
+              aria-expanded={scanOpen}
+              title="Scan invite QR code"
+            >
+              <QrIcon size={15} /> <span className="btn-label">Scan</span>
+            </button>
             <button type="submit" className="btn" disabled={!joinValue.trim()}>
               Join
             </button>
           </form>
+          {scanOpen ? (
+            <div className="join-scan">
+              <QrScanner
+                key={scanNonce}
+                onResult={onScanResult}
+                hint="Point the camera at the host’s invite QR."
+              />
+              {scanError && (
+                <p className="notice" role="alert">
+                  {scanError}
+                </p>
+              )}
+              <button
+                className="btn btn-ghost"
+                onClick={() => {
+                  setScanOpen(false);
+                  setScanError("");
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : null}
           {recents.length > 0 ? (
             <div className="recents">
               <div className="recents-head">

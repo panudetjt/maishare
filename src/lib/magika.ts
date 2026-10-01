@@ -44,10 +44,13 @@ function loadMagika(): Promise<MagikaModule | null> {
       const mod = await import("../../vendor/katgpt-magika-wasm/katgpt_magika_wasm.js");
       const { default: wasmUrl } =
         await import("../../vendor/katgpt-magika-wasm/katgpt_magika_wasm_bg.wasm?url");
-      await mod.default(wasmUrl);
+      await mod.default({ module_or_path: wasmUrl });
       return mod;
     } catch (err) {
       console.warn("magika wasm unavailable — keeping browser-derived mime", err);
+      // drop the memo so the NEXT sniff retries — a one-off failure (flaky
+      // fetch, interrupted compile) must not kill detection for the session
+      loading = null;
       return null;
     }
   })();

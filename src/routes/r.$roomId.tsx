@@ -16,7 +16,15 @@ import { Conversation, type PendingFile } from "../components/Conversation";
 import { PeerList } from "../components/PeerList";
 import { QrInvite } from "../components/QrInvite";
 import { Toasts } from "../components/Toasts";
-import { ArrowLeft, CopyIcon, LockIcon, LockOpenIcon, Logo, QrIcon } from "../components/Icons";
+import {
+  ArrowLeft,
+  CopyIcon,
+  LockIcon,
+  LockOpenIcon,
+  Logo,
+  QrIcon,
+  XIcon,
+} from "../components/Icons";
 
 export const roomSearchSchema = z.object({
   k: z.string().min(4).max(200).optional().catch(undefined),
@@ -58,9 +66,11 @@ function RoomRoute() {
   const name = search.name ?? profileName;
   // NV-03: the key travels in the URL fragment (#k=…) — fragments never reach
   // the server, so no logging layer can capture it. Legacy ?k= links are read
-  // as a fallback and migrated below.
-  const [fragmentKey] = useState(() => readKeyFromHash());
-  const key = fragmentKey ?? search.k;
+  // as a fallback and migrated below. The hash is re-read on every render (a
+  // router navigation re-renders this route): freezing it in state would let
+  // the ?k=→#k= migration briefly demote the key to undefined and rebuild the
+  // client as a keyless ghost session.
+  const key = readKeyFromHash() ?? search.k;
   const { client, state } = useRoom(
     roomId,
     key,
@@ -122,7 +132,7 @@ function RoomRoute() {
       to: "/r/$roomId",
       params: { roomId },
       search: (prev) => ({ name: prev.name, ks: prev.ks }),
-      hash: `k=${encodeURIComponent(fragmentKey ?? search.k!)}`,
+      hash: `k=${encodeURIComponent(search.k!)}`,
       replace: true,
     });
     // once on landing — the key is stable for the lifetime of the page
@@ -226,14 +236,32 @@ function RoomRoute() {
       {showQr && <QrInvite url={inviteUrl} onClose={() => setShowQr(false)} />}
 
       {state.kicked && (
-        <div className="notice" role="alert">
-          The room host removed you from this room. Reconnecting is disabled — ask for a fresh
-          invite if this was a mistake.
+        <div className="consent-overlay">
+          <div
+            className="consent-panel panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="kicked-title"
+          >
+            <span className="consent-icon is-err" aria-hidden="true">
+              <XIcon size={22} />
+            </span>
+            <h2 id="kicked-title">Removed from the room</h2>
+            <p>
+              The host removed you from this room. Rejoining with the same invite is disabled — ask
+              them for a fresh invite if this was a mistake.
+            </p>
+            <div className="consent-actions">
+              <button className="btn btn-primary" onClick={() => void navigate({ to: "/" })}>
+                Back to home
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
       <div className="room-body">
-        <PeerList state={state} />
+        <PeerList state={state} onKick={(peerId) => client?.kickPeer(peerId)} />
         <main className="room-main">
           {client ? (
             <Conversation

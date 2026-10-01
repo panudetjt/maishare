@@ -67,6 +67,9 @@ function loadMarkdownIt(): Promise<MarkdownItInstance | null> {
     })
     .catch((err) => {
       console.warn("markdown-it unavailable — markdown renders as plain text", err);
+      // retry on the next bubble — a one-off chunk fetch failure is not a
+      // permanent verdict for the session
+      mdPromise = null;
       return null;
     });
   return mdPromise;
@@ -97,6 +100,7 @@ function loadMermaid(): Promise<Mermaid | null> {
     })
     .catch((err) => {
       console.warn("mermaid unavailable — diagram fences stay as code", err);
+      mermaidPromise = null;
       return null;
     });
   return mermaidPromise;

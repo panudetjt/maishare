@@ -188,14 +188,16 @@ describe("transfer size cross-check (SEC-02)", () => {
     const ch = h.openChannel(peer);
     await h.flush();
 
-    // short delivery: 10 of the announced 16 bytes, then file-end
+    // short delivery: 10 of the announced 16 bytes, then file-end — the
+    // counter keeps the RECEIVED bytes (10, not the claimed 16) and the
+    // transfer settles as error, never as a silent empty "received"
     ch.receive(fileStart("short", 16));
     ch.receive(chunk(new Uint8Array(10).fill(3)));
     ch.receive(fileEnd("short"));
     await h.settle();
 
     const v = inboundView();
-    expect(v.status).toBe("done");
+    expect(v.status).toBe("error");
     expect(v.bytes).toBe(10); // received bytes, not the claimed 16
   });
 
@@ -292,20 +294,21 @@ describe("transfer size cross-check (SEC-02)", () => {
       const ch = h.openChannel(peer);
       await h.flush();
 
-      // announce far past the RAM limit, deliver a slice, finish
+      // announce far past the RAM limit, deliver the full claim in one chunk,
+      // finish
       ch.receive(fileStart("big", RAM_BUFFER_LIMIT + 1024, "big.iso"));
       await h.settle();
       const v1 = h.client.getSnapshot().transfers.find((t) => t.id === "big");
       expect(v1?.status).toBe("active");
 
-      ch.receive(chunk(new Uint8Array(1000).fill(7)));
+      ch.receive(chunk(new Uint8Array(RAM_BUFFER_LIMIT + 1024).fill(7)));
       ch.receive(fileEnd("big"));
       await h.settle();
 
       const v = h.client.getSnapshot().transfers.find((t) => t.id === "big")!;
       expect(v.status).toBe("done");
-      expect(v.bytes).toBe(1000);
-      expect(v.blob?.size).toBe(1000);
+      expect(v.bytes).toBe(RAM_BUFFER_LIMIT + 1024);
+      expect(v.blob?.size).toBe(RAM_BUFFER_LIMIT + 1024);
       expect(files.size).toBe(1);
     } finally {
       vi.unstubAllGlobals();

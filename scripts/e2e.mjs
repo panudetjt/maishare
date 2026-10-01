@@ -166,6 +166,19 @@ try {
     await mob.close();
   }
 
+  // ---- join card: the scan button opens the QR scanner ----
+  // Headless has no camera, so this drives the scanner's manual-paste
+  // fallback — the same onResult path a decoded invite QR feeds.
+  await alice.page.getByRole("button", { name: /scan/i }).click();
+  await alice.page.locator(".qr-scanner").waitFor({ timeout: 5_000 });
+  ok("join card scan button opens the scanner", true);
+  await alice.page.getByLabel("Paste a share code").fill("scanjoin1");
+  await alice.page.getByRole("button", { name: /use code/i }).click();
+  await alice.page.waitForURL(/\/r\/scanjoin1/, { timeout: 5_000 });
+  ok("scanner paste fallback joins the room", true);
+  await alice.page.goBack();
+  await alice.page.getByText("Start sharing").waitFor({ timeout: 5_000 });
+
   // ---- create a room ----
   await alice.page.getByLabel("Your display name").fill("alice");
   await alice.page.getByRole("button", { name: /create a room/i }).click();
@@ -237,7 +250,11 @@ try {
       .locator(".attach-chip", { hasText: "nearby-payload.txt" })
       .waitFor({ timeout: 5000 });
     await n1.page.getByRole("button", { name: "Send", exact: true }).click();
-    await n2.page.locator(".transfer-done").first().waitFor({ timeout: 30_000 });
+    // a received .txt renders as an inline text preview (bubble-textfile), a
+    // binary would keep the classic bubble-file row — both mean "arrived"
+    await n2.page.locator(".bubble-file.transfer-done, .bubble-textfile").first().waitFor({
+      timeout: 30_000,
+    });
     ok("nearby file received", true);
     const [nbDownload] = await Promise.all([
       n2.page.waitForEvent("download", { timeout: 10_000 }),
@@ -347,13 +364,16 @@ try {
   await alice.page.getByText("here comes the payload").waitFor({ timeout: 10_000 });
   ok("attached message sent by alice", true);
   await bob.page.getByText("here comes the payload").waitFor({ timeout: 10_000 });
-  await bob.page.locator(".bubble-file.transfer-done").first().waitFor({ timeout: 30_000 });
+  await bob.page
+    .locator(".bubble-file.transfer-done, .bubble-textfile")
+    .first()
+    .waitFor({ timeout: 30_000 });
   ok("text and file arrive together on bob", true);
   const combinedMsg = bob.page.locator(".msg", { hasText: "here comes the payload" });
   ok(
     "text and attachment share ONE bubble",
     (await combinedMsg.locator(".bubble").count()) === 1 &&
-      (await combinedMsg.locator(".bubble-file").count()) === 1,
+      (await combinedMsg.locator(".bubble-file, .bubble-textfile").count()) === 1,
   );
 
   // download and verify content integrity
@@ -377,9 +397,11 @@ try {
   });
   await bob.page.locator(".attach-chip", { hasText: "bare.txt" }).waitFor({ timeout: 5000 });
   await bob.page.getByRole("button", { name: "Send", exact: true }).click();
-  await alice.page.locator(".bubble-file.transfer-done", { hasText: "bare.txt" }).waitFor({
-    timeout: 30_000,
-  });
+  await alice.page
+    .locator(".bubble-file.transfer-done, .bubble-textfile", { hasText: "bare.txt" })
+    .waitFor({
+      timeout: 30_000,
+    });
   ok("file-only message received by alice", true);
 
   // resend pushes the files out again as a fresh message for late joiners
@@ -390,9 +412,11 @@ try {
   await bob.page.getByText("Resending 1 file").waitFor({ timeout: 5000 });
   await alice.page.waitForFunction(
     () =>
-      [...document.querySelectorAll(".bubble-file.transfer-done .bubble-file-name")].filter(
-        (el) => el.textContent === "bare.txt",
-      ).length >= 2,
+      [
+        ...document.querySelectorAll(
+          ".bubble-file.transfer-done .bubble-file-name, .bubble-textfile .bubble-textfile-name",
+        ),
+      ].filter((el) => el.textContent === "bare.txt").length >= 2,
     undefined,
     { timeout: 30_000 },
   );
@@ -484,9 +508,10 @@ try {
     JSON.stringify(Object.keys(bubbleZipped).sort()) === JSON.stringify(["pic-a.png", "pic-b.png"]),
   );
 
-  // ---- SEC-01: a secure-context joiner WITHOUT the key receives nothing ----
-  // they claim crypto capability, so no consent prompt may appear — the room
-  // key is the only way in, and the header lock still reflects key presence
+  // ---- SEC-11: a keyless joiner asks for the key; the host decides ----
+  // eve claims crypto capability, so no plaintext consent gate may appear —
+  // the overlay she draws is the key-share gate. The host's refusal ("keep
+  // them out") removes her from the room, which surfaces the kicked modal.
   const eveCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const eveUrl = new URL(invite);
   eveUrl.hash = ""; // strip the fragment key: eve is the keyless joiner
@@ -494,26 +519,21 @@ try {
   const evePage = await eveCtx.newPage();
   await evePage.goto(eveUrl.href, { waitUntil: "domcontentloaded" });
   await alice.page.getByText("2 peers", { exact: true }).waitFor({ timeout: 20_000 });
-  ok(
-    "no consent prompt for a crypto-capable joiner",
-    (await alice.page.locator(".consent-overlay").count()) === 0,
-  );
+  await alice.page.getByText("joined without the room key").waitFor({ timeout: 10_000 });
+  ok("keyless joiner draws the key-share gate (never the plaintext one)", true);
   ok(
     "keyed room header shows the lock",
     (await alice.page.locator(".room-code svg").count()) === 1,
   );
   ok("keyless joiner header has no lock", (await evePage.locator(".room-code svg").count()) === 0);
-  await alice.page.getByRole("textbox", { name: "Message" }).fill("eve must not see this");
-  await alice.page.getByRole("button", { name: "Send", exact: true }).click();
-  await bob.page.getByText("eve must not see this").waitFor({ timeout: 10_000 });
-  ok("proven peer still receives sealed chat", true);
+  await alice.page.getByRole("button", { name: /keep them out/i }).click();
   await evePage
-    .getByText("eve must not see this")
-    .waitFor({ timeout: 3000 })
-    .then(
-      () => ok("secure keyless joiner receives nothing", false),
-      () => ok("secure keyless joiner receives nothing", true),
-    );
+    .getByRole("heading", { name: "Removed from the room" })
+    .waitFor({ timeout: 10_000 });
+  ok("refused keyless joiner is kicked and sees the removal modal", true);
+  await evePage.getByRole("button", { name: /back to home/i }).click();
+  await evePage.waitForURL((u) => !u.pathname.startsWith("/r/"), { timeout: 10_000 });
+  ok("kicked joiner returns home on accept", true);
   await eveCtx.close();
   await alice.page.waitForFunction(
     () => document.querySelectorAll(".peer-list li.peer").length === 2,
@@ -566,7 +586,7 @@ try {
   });
   await alice.page.getByRole("button", { name: "Send", exact: true }).click();
   await iosPage
-    .locator(".bubble-file.transfer-done", { hasText: "ios-payload.txt" })
+    .locator(".bubble-file.transfer-done, .bubble-textfile", { hasText: "ios-payload.txt" })
     .waitFor({ timeout: 30_000 });
   ok("insecure peer receives files from a sealed room", true);
 
@@ -607,6 +627,30 @@ try {
   await alice.page.getByText(/your message could not be decrypted/i).waitFor({ timeout: 10_000 });
   ok("sender is told the other side could not decrypt", true);
   await rogueCtx.close();
+
+  // ---- host kicks a member: the removed side gets a blocking modal ----
+  // The kick button arms on the first tap (a kick bars the peer's id from
+  // rejoining) and fires on the second.
+  const kickBtn = alice.page.locator(".peer-kick").first();
+  await kickBtn.click();
+  await alice.page.locator(".peer-kick.is-armed").waitFor({ timeout: 5000 });
+  await kickBtn.click();
+  ok("host kick sends after the two-tap confirm", true);
+  await bob.page
+    .getByRole("heading", { name: "Removed from the room" })
+    .waitFor({ timeout: 10_000 });
+  ok("kicked member sees the removal modal", true);
+  await bob.page.getByRole("button", { name: /back to home/i }).click();
+  await bob.page.waitForURL((u) => !u.pathname.startsWith("/r/"), { timeout: 10_000 });
+  ok("kicked member returns home on accept", true);
+  const rosterNames = await alice.page.evaluate(() =>
+    [...document.querySelectorAll(".peer-list .peer-name")].map((n) => n.textContent),
+  );
+  ok(
+    "kick removes the member from the host roster",
+    rosterNames.length === 1 && rosterNames[0].includes("alice"),
+    JSON.stringify(rosterNames),
+  );
 
   // ---- leave ----
   await bob.ctx.close();

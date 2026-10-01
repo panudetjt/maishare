@@ -71,7 +71,7 @@ const PLAIN = (c: Control) => concatFrame(FRAME.CONTROL, encoder.encode(JSON.str
 function openScripted(
   harness: RoomHarness,
   peerId: string,
-  opts: { key?: string; reportWhileKeyless?: boolean } = {},
+  opts: { key?: string; reportWhileKeyless?: boolean; followupChat?: boolean } = {},
 ): { peer: HarnessPeer; ch: FakeDataChannel } {
   const peer = harness.addPeer(peerId);
   const created = peer.channel as FakeDataChannel;
@@ -89,7 +89,7 @@ function openScripted(
  * sender; the fixed receiver stays quiet while it holds no key at all. */
 function scriptPeer(
   ch: FakeDataChannel,
-  opts: { key?: string; reportWhileKeyless?: boolean } = {},
+  opts: { key?: string; reportWhileKeyless?: boolean; followupChat?: boolean } = {},
 ) {
   const state: { cipher: RoomCipher | null } = { cipher: null };
   let reported = false;
@@ -118,6 +118,19 @@ function scriptPeer(
               encoder.encode(JSON.stringify({ t: "ping", at: Date.now(), n: "peer-challenge" })),
             ),
           );
+          // a real member's message right after the challenge: the first
+          // sealed frame is the ping (absorbed by design), so this is what a
+          // wrong-key receiver must bubble and report
+          if (opts.followupChat) {
+            ch.receive(
+              await state.cipher.seal(
+                FRAME.CONTROL_ENC,
+                encoder.encode(
+                  JSON.stringify({ t: "chat", id: "peer-chat-1", text: "for you", at: Date.now() }),
+                ),
+              ),
+            );
+          }
         }
       } else if (c.t === "key-offer" && typeof c.k === "string" && !state.cipher) {
         state.cipher = await RoomCipher.fromKey(c.k);
@@ -314,9 +327,6 @@ describe("receiver-side back-channel", () => {
     const ch = h.openChannel(peer);
     await h.flush();
 
-    // a sealed control frame the victim cannot open (bogus ciphertext)
-    ch.receive(concatFrame(FRAME.CONTROL_ENC, new Uint8Array(40).fill(5)));
-    await h.settle();
     const reports = () =>
       ch.sent
         .filter((f) => f[0] === FRAME.CONTROL)
@@ -327,6 +337,18 @@ describe("receiver-side back-channel", () => {
             },
         )
         .filter((c) => c.t === "undecryptable");
+
+    // the FIRST sealed frame of any connection is provably the proof-challenge
+    // ping — its failure is the designed join state (keyless or wrong key) and
+    // is absorbed, never reported
+    ch.receive(concatFrame(FRAME.CONTROL_ENC, new Uint8Array(40).fill(5)));
+    await h.settle();
+    expect(reports()).toEqual([]);
+
+    // a sealed control frame the victim cannot open (bogus ciphertext) past
+    // the challenge window reports once, naming the kind
+    ch.receive(concatFrame(FRAME.CONTROL_ENC, new Uint8Array(40).fill(5)));
+    await h.settle();
     expect(reports().at(-1)).toMatchObject({ detail: "sealed", kind: "frame" });
 
     // the back-channel fires once per connection — a fresh connection is
@@ -344,7 +366,17 @@ describe("receiver-side back-channel", () => {
         (f) => JSON.parse(decoder.decode(f.subarray(1)) as string) as Control & { kind?: string },
       )
       .filter((c) => c.t === "undecryptable");
-    expect(chunkReports.at(-1)).toMatchObject({ detail: "sealed", kind: "chunk" });
+    expect(chunkReports).toEqual([]); // first sealed frame — the ping — absorbed
+
+    ch2.receive(concatFrame(FRAME.CHUNK_ENC, new Uint8Array(40).fill(5)));
+    await h.settle();
+    const chunkReports2 = ch2.sent
+      .filter((f) => f[0] === FRAME.CONTROL)
+      .map(
+        (f) => JSON.parse(decoder.decode(f.subarray(1)) as string) as Control & { kind?: string },
+      )
+      .filter((c) => c.t === "undecryptable");
+    expect(chunkReports2.at(-1)).toMatchObject({ detail: "sealed", kind: "chunk" });
   });
 
   it("a receiver holding no key stays quiet about sealed frames it cannot open", async () => {
@@ -376,12 +408,16 @@ describe("receiver-side back-channel", () => {
   });
 
   it("a receiver holding a DIFFERENT key still reports the failure", async () => {
-    // the suppression covers only "no key at all" — a wrong key is a real
-    // anomaly and must keep bubbling and reporting
+    // the suppression covers the proof-challenge ping (the designed join
+    // state); a wrong key meeting REAL traffic is a live anomaly and must
+    // keep bubbling and reporting — once per connection on the back-channel
     const wrongKey = createRoomHarness({ key: "a different room key" });
     try {
       await wrongKey.start();
-      const { ch } = openScripted(wrongKey, IMPOLITE_PEER, { key: ROOM_KEY });
+      const { ch } = openScripted(wrongKey, IMPOLITE_PEER, {
+        key: ROOM_KEY,
+        followupChat: true,
+      });
       await wrongKey.flush();
       await wrongKey.settle();
 

@@ -217,6 +217,23 @@ code {
   min-width: 0;
 }
 
+.join-scan {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.join-scan .btn-ghost {
+  align-self: flex-start;
+}
+
+@media (max-width: 480px) {
+  /* three labelled controls crowd a narrow phone — the scan button goes icon-only */
+  .join-form .btn-label {
+    display: none;
+  }
+}
+
 .recents {
   margin-top: 18px;
 }
@@ -717,6 +734,29 @@ input::placeholder {
   background: var(--bg2);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
+}
+/* host-only member removal: dim until hover, red while armed for the
+   second tap; on touch devices (no hover) it stays faintly visible */
+.peer-kick {
+  opacity: 0;
+  transition: opacity 0.15s;
+  flex: none;
+}
+.peer:hover .peer-kick,
+.peer-kick:focus-visible {
+  opacity: 0.75;
+}
+.peer-kick.is-armed,
+.peer-kick.is-armed:hover {
+  opacity: 1;
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.14);
+  border-radius: 8px;
+}
+@media (hover: none) {
+  .peer-kick {
+    opacity: 0.55;
+  }
 }
 .avatar {
   width: 32px;
@@ -1971,6 +2011,10 @@ input::placeholder {
   border-radius: 12px;
   background: rgba(224, 168, 60, 0.14);
   color: var(--warn, #e0a83c);
+}
+.consent-icon.is-err {
+  background: rgba(248, 113, 113, 0.14);
+  color: #f87171;
 }
 .consent-panel h2 {
   font-size: 17px;

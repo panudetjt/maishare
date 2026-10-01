@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { RoomClient, type RoomState } from "./room-client";
 
 const EMPTY: RoomState = {
@@ -32,9 +32,16 @@ export function useRoom(
   keyShare?: "anyone",
 ) {
   const [client, setClient] = useState<RoomClient | null>(null);
+  const clientRef = useRef<RoomClient | null>(null);
 
   useEffect(() => {
-    const c = new RoomClient({ roomId, key, name, keyShare });
+    // a router transient (the legacy ?k=→#k= migration replays this route
+    // with the search already scrubbed and the hash not yet applied) can
+    // remount here keyless — inherit the previous client's key for the room
+    // so a keyed seat never silently demotes into a key-requesting one
+    const effectiveKey = key ?? clientRef.current?.getSnapshot().selfKey ?? undefined;
+    const c = new RoomClient({ roomId, key: effectiveKey, name, keyShare });
+    clientRef.current = c;
     void c.start();
     setClient(c);
     return () => c.dispose();

@@ -83,6 +83,7 @@ function loadCore(): Promise<Hljs | null> {
     .then((m) => m.default)
     .catch((err) => {
       console.warn("highlight.js unavailable — code renders as plain text", err);
+      core = null; // retry on the next code bubble — don't ban the grammar for the session
       return null;
     });
   return core;

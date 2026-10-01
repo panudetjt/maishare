@@ -1,5 +1,6 @@
+import { useEffect, useRef, useState } from "react";
 import type { PeerView, RoomState } from "../lib/p2p/room-client";
-import { UsersIcon } from "./Icons";
+import { UsersIcon, XIcon } from "./Icons";
 
 function dotClass(status: PeerView["status"]): string {
   switch (status) {
@@ -12,9 +13,36 @@ function dotClass(status: PeerView["status"]): string {
   }
 }
 
-export function PeerList({ state }: { state: RoomState }) {
+export function PeerList({
+  state,
+  onKick,
+}: {
+  state: RoomState;
+  /** host-only: removes a member from the room (server enforces authority) */
+  onKick?: (peerId: string) => void;
+}) {
   const open = state.peers.filter((p) => p.status === "open").length;
   const isHost = (peerId: string) => state.hostId != null && peerId === state.hostId;
+  const selfIsHost = state.hostId != null && state.selfId === state.hostId;
+  // a kick is irreversible — the removed peer's id is barred from rejoining —
+  // so the first tap only arms the button and the second one confirms
+  const [armed, setArmed] = useState<string | null>(null);
+  const armTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => clearTimeout(armTimer.current), []);
+  const tapKick = (peerId: string) => {
+    if (armed === peerId) {
+      clearTimeout(armTimer.current);
+      setArmed(null);
+      onKick?.(peerId);
+      return;
+    }
+    setArmed(peerId);
+    clearTimeout(armTimer.current);
+    armTimer.current = window.setTimeout(
+      () => setArmed((cur) => (cur === peerId ? null : cur)),
+      2600,
+    );
+  };
   return (
     <aside className="peers panel">
       <div className="peers-head">
@@ -28,7 +56,7 @@ export function PeerList({ state }: { state: RoomState }) {
           <span className="peer-info">
             <span className="peer-name">
               {state.selfName} <em className="you-tag">you</em>
-              {isHost(state.selfId) ? <em className="host-tag">host</em> : null}
+              {selfIsHost ? <em className="host-tag">host</em> : null}
             </span>
             <span className="peer-meta">
               {state.encrypted ? "end-to-end encrypted" : "dtls encrypted"}
@@ -49,7 +77,23 @@ export function PeerList({ state }: { state: RoomState }) {
                 {p.rtt != null && p.status === "open" ? ` · ${p.rtt} ms` : ""}
               </span>
             </span>
-            <span className={dotClass(p.status)} title={p.status} />
+            {selfIsHost && onKick && !isHost(p.peerId) ? (
+              <button
+                type="button"
+                className={`btn-icon peer-kick ${armed === p.peerId ? "is-armed" : ""}`}
+                onClick={() => tapKick(p.peerId)}
+                aria-label={
+                  armed === p.peerId
+                    ? `Confirm removing ${p.name}`
+                    : `Remove ${p.name} from the room`
+                }
+                title={armed === p.peerId ? "Tap again to remove" : "Remove from room"}
+              >
+                <XIcon size={13} />
+              </button>
+            ) : (
+              <span className={dotClass(p.status)} title={p.status} />
+            )}
           </li>
         ))}
         {!state.peers.length && (

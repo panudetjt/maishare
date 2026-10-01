@@ -588,7 +588,13 @@ export function Conversation({
           </button>
         </div>
       </form>
-      {rosterOpen && <RosterSheet state={state} onClose={() => setRosterOpen(false)} />}
+      {rosterOpen && (
+        <RosterSheet
+          state={state}
+          onClose={() => setRosterOpen(false)}
+          onKick={(peerId) => client.kickPeer(peerId)}
+        />
+      )}
     </div>
   );
 }

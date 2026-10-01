@@ -6,7 +6,16 @@ import { XIcon } from "./Icons";
 /** the peer roster as a bottom sheet. The sidebar PeerList is hidden on
  * narrow viewports (≤900px), and the peers chip in the conversation header
  * opens this so a phone can still see who is in the room. */
-export function RosterSheet({ state, onClose }: { state: RoomState; onClose: () => void }) {
+export function RosterSheet({
+  state,
+  onClose,
+  onKick,
+}: {
+  state: RoomState;
+  onClose: () => void;
+  /** host-only member removal, rendered by the PeerList rows */
+  onKick?: (peerId: string) => void;
+}) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -35,7 +44,7 @@ export function RosterSheet({ state, onClose }: { state: RoomState; onClose: () 
         >
           <XIcon size={16} />
         </button>
-        <PeerList state={state} />
+        <PeerList state={state} onKick={onKick} />
       </div>
     </div>
   );

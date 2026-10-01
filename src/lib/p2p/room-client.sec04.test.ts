@@ -160,7 +160,7 @@ describe("transfer-list caps, supersede settle, stale sweep (SEC-04)", () => {
       await vi.advanceTimersByTimeAsync(60);
 
       // finish a transfer cleanly: header → chunk → file-end
-      ch.receive(fileStart("late"));
+      ch.receive(fileStart("late", 8));
       ch.receive(chunk(8));
       await vi.advanceTimersByTimeAsync(60);
       ch.receive(fileEnd("late"));
@@ -201,7 +201,7 @@ describe("transfer-list caps, supersede settle, stale sweep (SEC-04)", () => {
 
       ch.receive(fileStart("busy", 240));
       await vi.advanceTimersByTimeAsync(60);
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 30; i++) {
         ch.receive(chunk(8));
         await vi.advanceTimersByTimeAsync(PING_EVERY * 1.5); // sweep between chunks
       }
