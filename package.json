@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Local-first, peer-to-peer sharing for files and text chat over WebRTC",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vp dev --host 0.0.0.0",
