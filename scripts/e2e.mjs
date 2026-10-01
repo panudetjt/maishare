@@ -70,6 +70,16 @@ try {
   await alice.page.getByText("Start sharing").waitFor({ timeout: 10_000 });
   ok("home renders", true);
 
+  // production CSP stays tight: the sniffing wasm may compile, inline scripts
+  // may not — 'unsafe-inline' is dev-only (vite's react-refresh preamble)
+  const csp = (await fetch(`${BASE}/`)).headers.get("content-security-policy") ?? "";
+  const scriptSrc = csp.match(/script-src[^;]*/)?.[0] ?? "";
+  ok(
+    "prod CSP: script-src allows wasm but not inline",
+    scriptSrc.includes("'wasm-unsafe-eval'") && !scriptSrc.includes("'unsafe-inline'"),
+    scriptSrc,
+  );
+
   // ---- create a room ----
   await alice.page.getByLabel("Your display name").fill("alice");
   await alice.page.getByRole("button", { name: /create a room/i }).click();

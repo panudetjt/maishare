@@ -17,11 +17,17 @@ import { rewriteShareHtml } from "./share-html";
  * inline scripts and no third-party origins, so the policy is tight — inline
  * STYLES stay allowed (React/PhotoSwipe inject style attributes), and
  * 'wasm-unsafe-eval' keeps the Magika content-sniffing wasm working without
- * opening the door to eval().
+ * opening the door to eval(). Dev runs one step looser: Vite's react-refresh
+ * preamble is an inline script, so the production script-src would block it
+ * and leave `vp dev` a blank page — production/preview/deploy stay tight.
  */
+const CSP_SCRIPT_SRC = import.meta.env.PROD
+  ? "script-src 'self' 'wasm-unsafe-eval'"
+  : "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'";
+
 const HTML_SECURITY_HEADERS: Record<string, string> = {
   "content-security-policy":
-    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+    `default-src 'self'; ${CSP_SCRIPT_SRC}; style-src 'self' 'unsafe-inline'; ` +
     "img-src 'self' data: blob:; media-src 'self' blob:; " +
     "connect-src 'self' blob: ws: wss:; " +
     "worker-src 'self'; manifest-src 'self'; font-src 'self'; object-src 'none'; " +

@@ -34,7 +34,10 @@ describe("codeLanguage", () => {
       "ini",
     );
     expect(codeLanguage(info({ label: "diff", group: "text" }))).toBe("diff");
-    expect(codeLanguage(info({ label: "markdown", group: "text" }))).toBe("markdown");
+  });
+
+  it("leaves markdown to the rich renderer, not source highlighting", () => {
+    expect(codeLanguage(info({ label: "markdown", group: "text" }))).toBeNull();
   });
 
   it("returns null for prose, unknown labels, and missing info", () => {

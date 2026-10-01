@@ -44,12 +44,12 @@ const GRAMMARS: Record<string, string> = {
   powershell: "powershell",
   asm: "x86asm",
   dockerfile: "dockerfile",
-  markdown: "markdown",
   diff: "diff",
 };
 
-/** text-group labels that are still structured enough for a code render */
-const STRUCTURED_TEXT = new Set(["toml", "ini", "markdown", "diff"]);
+/** text-group labels that are still structured enough for a code render
+ * (markdown is deliberately absent — it renders rich, see markdown.ts) */
+const STRUCTURED_TEXT = new Set(["toml", "ini", "diff"]);
 
 /** below this the sniff is a guess, not a fact — stay plain text (mirrors
  * magika.ts's own MIN_SCORE) */
@@ -136,13 +136,14 @@ async function prepare(lang: string): Promise<Hljs | null> {
 }
 
 /**
- * Highlighted HTML for detected code text, or null to keep the plain render
- * (no grammar, oversized input, or a failed load). The returned string is
- * hljs-escaped — safe to inject via dangerouslySetInnerHTML.
+ * Highlighted HTML for an explicit highlight.js grammar id, or null to keep
+ * the plain render (unknown grammar, oversized input, or a failed load). Used
+ * both by code bubbles (magika label mapped first) and by markdown fences
+ * (info string is the grammar id). The returned string is hljs-escaped —
+ * safe to inject via dangerouslySetInnerHTML.
  */
-export async function highlightCode(text: string, info: SniffInfo): Promise<string | null> {
-  const lang = codeLanguage(info);
-  if (!lang || text.length > MAX_HIGHLIGHT_CHARS) return null;
+export async function highlightWithGrammar(text: string, lang: string): Promise<string | null> {
+  if (!LOADERS[lang] || text.length > MAX_HIGHLIGHT_CHARS) return null;
   try {
     const hljs = await prepare(lang);
     if (!hljs) return null;
@@ -151,4 +152,11 @@ export async function highlightCode(text: string, info: SniffInfo): Promise<stri
     console.warn(`code highlight failed for ${lang} — rendering plain`, err);
     return null;
   }
+}
+
+/** highlighted HTML for text whose language came from a Magika sniff */
+export async function highlightCode(text: string, info: SniffInfo): Promise<string | null> {
+  const lang = codeLanguage(info);
+  if (!lang) return null;
+  return highlightWithGrammar(text, lang);
 }

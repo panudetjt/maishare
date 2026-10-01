@@ -1,9 +1,10 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": {
-    // Workers runtime: no DOM — types come from @cloudflare/workers-types
+    // Workers runtime: no DOM — types come from @cloudflare/workers-types.
+    // vite/client types import.meta.env (the dev/prod switch the CSP reads).
     "lib": ["ES2022"],
-    "types": ["@cloudflare/workers-types"]
+    "types": ["@cloudflare/workers-types", "vite/client"]
   },
   "include": ["**/*.ts"]
 }

@@ -11,10 +11,16 @@ import {
 import type { SlideData } from "photoswipe";
 import PhotoSwipeLightbox from "photoswipe/lightbox";
 import "photoswipe/style.css";
-import type { RoomClient, RoomState, TransferView } from "../lib/p2p/room-client";
+import {
+  MAX_TEXTFILE_BYTES,
+  type RoomClient,
+  type RoomState,
+  type TransferView,
+} from "../lib/p2p/room-client";
 import { buildTimeline, dayLabel, type TimelineMessage } from "../lib/timeline";
 import { withDetectedExtension, type SniffInfo } from "../lib/magika";
 import { codeLanguage, highlightCode, isCodeText } from "../lib/highlight";
+import { isMarkdownText, renderMarkdown, upgradeMarkdown } from "../lib/markdown";
 import { formatBytes, formatClock, formatSpeed } from "../lib/format";
 import {
   ArrowDown,
@@ -184,6 +190,22 @@ function FileTypeIcon({ t, size = 20 }: { t: TransferView; size?: number }) {
   if (g === "archive") return <ArchiveIcon size={size} />;
   if (g === "code") return <CodeIcon size={size} />;
   return <FileIcon size={size} />;
+}
+
+/**
+ * True when a file attachment should render as an inline text preview (the
+ * dropped/browsed sibling of the paste flow). Strict: Magika must vouch the
+ * bytes are human-readable text, the file must fit the same inline budget as
+ * the asText path, and the blob must be in hand (the sender holds it at
+ * attach time; the receiver only after the transfer lands).
+ */
+function textPreviewEligible(t: TransferView): boolean {
+  return (
+    !(t.asText && t.text != null) &&
+    t.blob != null &&
+    t.detected?.isText === true &&
+    t.size <= MAX_TEXTFILE_BYTES
+  );
 }
 
 export function Conversation({
@@ -599,6 +621,15 @@ function MessageBubble({
     ...(message.text != null ? [message.text] : []),
     ...message.files.filter((f) => f.asText && f.text != null).map((f) => f.text!),
   ].join("\n\n");
+  // a rendered (markdown/code) text part or an inline text-file preview is
+  // worth a source toggle — the rich view is lossy in format, so the user can
+  // always read the bytes as sent
+  const richText = (d?: SniffInfo) => isMarkdownText(d) || isCodeText(d);
+  const hasRichParts =
+    richText(message.textDetected) ||
+    message.files.some((f) => f.asText && f.text != null && richText(f.detected)) ||
+    message.files.some(textPreviewEligible);
+  const [raw, setRaw] = useState(false);
   return (
     <div className={`msg ${message.mine ? "msg-mine" : ""}`}>
       {message.firstOfGroup && (
@@ -629,17 +660,26 @@ function MessageBubble({
       )}
       <div className={`bubble ${message.system ? "bubble-system" : ""}`}>
         {message.text != null && (
-          <TextPart text={message.text} detected={message.textDetected} onCopy={onCopy} />
+          <TextPart text={message.text} detected={message.textDetected} onCopy={onCopy} raw={raw} />
         )}
-        {message.files.length > 0 && (
+        {message.files.map((f) =>
+          // long asText parts and text-file previews render as siblings of
+          // the caption, NOT inside .bubble-files: that strip is a
+          // width-capped flex row, and a flex item's min-content floor (one
+          // long code line) would blow the bubble open instead of letting
+          // the block scroll inside
+          f.asText && f.text != null ? (
+            <TextPart key={f.id} text={f.text} detected={f.detected} onCopy={onCopy} raw={raw} />
+          ) : textPreviewEligible(f) ? (
+            <TextFilePreview key={f.id} t={f} onCopy={onCopy} onCancel={onCancel} raw={raw} />
+          ) : null,
+        )}
+        {message.files.some((f) => !(f.asText && f.text != null) && !textPreviewEligible(f)) && (
           <div className="bubble-files">
             {message.files.map((f) =>
-              // a long text that traveled as a .txt renders back as a text
-              // part — until its bytes land there is no text, so it still
-              // shows as an ordinary (progressing) file card
-              f.asText && f.text != null ? (
-                <TextPart key={f.id} text={f.text} detected={f.detected} onCopy={onCopy} />
-              ) : f.mime.startsWith("image/") ? (
+              (f.asText && f.text != null) || textPreviewEligible(f) ? null : f.mime.startsWith(
+                  "image/",
+                ) ? (
                 <ImageCell key={f.id} t={f} onOpen={onOpenImage} onCancel={onCancel} />
               ) : (
                 <FileRow key={f.id} t={f} onCancel={onCancel} />
@@ -658,6 +698,17 @@ function MessageBubble({
               title="Copy"
             >
               <CopyIcon size={14} />
+            </button>
+          )}
+          {hasRichParts && (
+            <button
+              type="button"
+              onClick={() => setRaw((v) => !v)}
+              aria-label={raw ? "Show rendered" : "View source"}
+              aria-pressed={raw}
+              title={raw ? "Show rendered" : "View source — read the text exactly as it was sent"}
+            >
+              <CodeIcon size={14} />
             </button>
           )}
           {savable.length >= 2 && (
@@ -690,16 +741,21 @@ function TextPart({
   text,
   detected,
   onCopy,
+  raw,
 }: {
   text: string;
   detected?: SniffInfo;
   onCopy?: (text: string) => void;
+  /** source view for the message — every part renders as the plain sent text */
+  raw?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const huge = text.length > LONG_TEXT_CHARS || text.split("\n").length > LONG_TEXT_LINES;
   return (
     <div className={`bubble-text-part ${huge && !expanded ? "bubble-clamped" : ""}`}>
-      {isCodeText(detected) ? (
+      {!raw && isMarkdownText(detected) ? (
+        <MarkdownPart text={text} />
+      ) : !raw && isCodeText(detected) ? (
         <CodeBlock text={text} detected={detected} onCopy={onCopy} />
       ) : (
         <div className="bubble-line">{text}</div>
@@ -717,20 +773,40 @@ function TextPart({
   );
 }
 
-/** code text rendered as a highlighted block — the grammar chunk loads on
- * demand, so the block starts as plain monospace and swaps once the
- * highlighted HTML lands (or stays plain if it never does) */
-function CodeBlock({
-  text,
-  detected,
-  onCopy,
-}: {
-  text: string;
-  detected: SniffInfo;
-  onCopy?: (text: string) => void;
-}) {
+/** markdown text rendered rich — a safe markdown-it subset (no raw HTML,
+ * links neutered) with the same lazy highlight.js on fences and real SVG
+ * diagrams for ```mermaid fences. Starts as plain text and swaps once the
+ * renderer chunk loads. */
+function MarkdownPart({ text }: { text: string }) {
   const [html, setHtml] = useState<string | null>(null);
-  const lang = codeLanguage(detected) ?? "code";
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    let alive = true;
+    void renderMarkdown(text).then((rendered) => {
+      if (alive && rendered) setHtml(rendered);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [text]);
+  // once the rendered HTML is in, upgrade in place: fence highlighting and
+  // mermaid diagrams. Only touches children React never reconciles.
+  useEffect(() => {
+    if (html == null || !bodyRef.current) return;
+    void upgradeMarkdown(bodyRef.current);
+  }, [html]);
+  return html == null ? (
+    <div className="bubble-line">{text}</div>
+  ) : (
+    <div ref={bodyRef} className="bubble-markdown" dangerouslySetInnerHTML={{ __html: html }} />
+  );
+}
+
+/** highlighted monospace body — shared by code bubbles and text-file previews;
+ * the grammar chunk loads on demand, so the block starts as plain monospace
+ * and swaps once the highlighted HTML lands (or stays plain if it never does) */
+function CodeBody({ text, detected }: { text: string; detected: SniffInfo }) {
+  const [html, setHtml] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     void highlightCode(text, detected).then((value) => {
@@ -740,6 +816,25 @@ function CodeBlock({
       alive = false;
     };
   }, [text, detected]);
+  return (
+    <pre className="bubble-code-body">
+      {/* hljs output is escaped — the only injected HTML is its own */}
+      {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{text}</code>}
+    </pre>
+  );
+}
+
+/** code text rendered as a highlighted block with a language header */
+function CodeBlock({
+  text,
+  detected,
+  onCopy,
+}: {
+  text: string;
+  detected: SniffInfo;
+  onCopy?: (text: string) => void;
+}) {
+  const lang = codeLanguage(detected) ?? "code";
   return (
     <div className="bubble-code">
       <div className="bubble-code-head">
@@ -756,10 +851,115 @@ function CodeBlock({
           </button>
         )}
       </div>
-      <pre className="bubble-code-body">
-        {/* hljs output is escaped — the only injected HTML is its own */}
-        {html ? <code dangerouslySetInnerHTML={{ __html: html }} /> : <code>{text}</code>}
-      </pre>
+      <CodeBody text={text} detected={detected} />
+    </div>
+  );
+}
+
+/**
+ * A dropped/browsed file attachment whose bytes Magika vouched for as
+ * human-readable text — rendered inline with the same machinery as pasted
+ * text (rich markdown / highlighted code / plain), framed by a header that
+ * keeps the file identity: name, size, transfer state, save and copy.
+ * Until the blob's text is read (and forever if that fails) it falls back to
+ * the ordinary file card.
+ */
+function TextFilePreview({
+  t,
+  onCopy,
+  onCancel,
+  raw,
+}: {
+  t: TransferView;
+  onCopy?: (text: string) => void;
+  onCancel: (id: string) => void;
+  raw?: boolean;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void t.blob?.text().then(
+      (value) => {
+        if (alive) setText(value);
+      },
+      () => {
+        if (alive) setFailed(true);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [t.blob]);
+  // no text in hand (still reading, read failed, or the blob is gone) — the
+  // ordinary file card covers every one of those states
+  if (t.blob == null || text == null || failed) return <FileRow t={t} onCancel={onCancel} />;
+
+  const huge = text.length > LONG_TEXT_CHARS || text.split("\n").length > LONG_TEXT_LINES;
+  const active = t.status === "active" || t.status === "queued";
+  const pct = t.size > 0 ? Math.min(100, Math.round((t.bytes / t.size) * 100)) : 0;
+  const detected = t.detected;
+  const body = raw ? (
+    <pre className="bubble-code-body">
+      <code>{text}</code>
+    </pre>
+  ) : isMarkdownText(detected) ? (
+    <MarkdownPart text={text} />
+  ) : isCodeText(detected) ? (
+    <CodeBody text={text} detected={detected} />
+  ) : (
+    <div className="bubble-line">{text}</div>
+  );
+  return (
+    <div className={`bubble-text-part ${huge && !expanded ? "bubble-clamped" : ""}`}>
+      <div className="bubble-textfile">
+        <div className="bubble-textfile-head">
+          <span className="bubble-textfile-name" title={t.name}>
+            {t.name}
+          </span>
+          <span className="bubble-textfile-meta">
+            {formatBytes(t.size)}
+            {active
+              ? ` · ${statusText(t)}${t.status === "active" ? ` · ${pct}%` : ""}`
+              : ` · ${statusText(t)}`}
+          </span>
+          <span className="bubble-textfile-actions">
+            {t.dir === "in" && t.blobUrl && (
+              <a
+                className="bubble-code-copy"
+                href={t.blobUrl}
+                download={withDetectedExtension(t.name, t.detected)}
+                aria-label={`Save ${t.name}`}
+                title="Save"
+              >
+                <DownloadIcon size={13} />
+              </a>
+            )}
+            {onCopy && (
+              <button
+                type="button"
+                className="bubble-code-copy"
+                onClick={() => onCopy(text)}
+                aria-label={`Copy ${t.name}`}
+                title="Copy file"
+              >
+                <CopyIcon size={13} />
+              </button>
+            )}
+          </span>
+        </div>
+        <div className="bubble-textfile-body">{body}</div>
+      </div>
+      {huge && (
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
     </div>
   );
 }
