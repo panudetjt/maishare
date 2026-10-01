@@ -40,9 +40,11 @@ import {
   SaveAllIcon,
   SendIcon,
   TrashIcon,
+  UsersIcon,
   VideoIcon,
   XIcon,
 } from "./Icons";
+import { RosterSheet } from "./RosterSheet";
 
 /**
  * The single conversation surface: chat messages and file transfers rendered
@@ -227,6 +229,12 @@ export function Conversation({
   const [draft, setDraft] = useState("");
   const [newBelow, setNewBelow] = useState(0);
   const [scrolledUp, setScrolledUp] = useState(false);
+  // the peer sidebar is hidden at the 900px breakpoint — there the peers chip
+  // becomes the roster's way in (tap → sheet). Same query as the CSS rule.
+  const [narrow, setNarrow] = useState(
+    () => typeof matchMedia === "function" && matchMedia("(max-width: 900px)").matches,
+  );
+  const [rosterOpen, setRosterOpen] = useState(false);
 
   const logRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -236,6 +244,19 @@ export function Conversation({
 
   const openPeers = state.peers.filter((p) => p.status === "open").length;
   const canSend = draft.trim().length > 0 || pending.length > 0;
+
+  // track the CSS breakpoint so the chip only acts as a roster button where
+  // the sidebar is actually hidden; a wide-viewport resize closes the sheet
+  useEffect(() => {
+    if (typeof matchMedia !== "function") return;
+    const mq = matchMedia("(max-width: 900px)");
+    const onChange = () => {
+      setNarrow(mq.matches);
+      if (!mq.matches) setRosterOpen(false);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   const scrollToBottom = useCallback((smooth = false) => {
     const el = logRef.current;
@@ -434,9 +455,21 @@ export function Conversation({
         <span className="stat" title="received this session">
           <ArrowDown /> {formatBytes(state.recvTotal)}
         </span>
-        <span className="stat stat-peers" title="connected peers">
-          {openPeers} peer{openPeers === 1 ? "" : "s"}
-        </span>
+        {narrow ? (
+          <button
+            className="stat stat-peers"
+            onClick={() => setRosterOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={rosterOpen}
+            title="Who's in this room"
+          >
+            <UsersIcon size={12} /> {openPeers} peer{openPeers === 1 ? "" : "s"}
+          </button>
+        ) : (
+          <span className="stat stat-peers" title="connected peers">
+            {openPeers} peer{openPeers === 1 ? "" : "s"}
+          </span>
+        )}
         <span className="conv-head-spacer" />
         {messages.length > 0 && (
           <button className="btn btn-ghost btn-sm" onClick={clearConversation}>
@@ -555,6 +588,7 @@ export function Conversation({
           </button>
         </div>
       </form>
+      {rosterOpen && <RosterSheet state={state} onClose={() => setRosterOpen(false)} />}
     </div>
   );
 }

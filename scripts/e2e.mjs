@@ -80,6 +80,92 @@ try {
     scriptSrc,
   );
 
+  // ---- mobile 320px: no horizontal overflow, roster sheet actually opens ----
+  // Regression for two real failures at phone width: (a) the home grid's bare
+  // `1fr` track used the join form's intrinsic input width as its minimum and
+  // pushed the page to ~354px of horizontal scroll; (b) the roster bottom
+  // sheet opened with ZERO height — `.room-body .peers { display:none }` also
+  // matched the PeerList inside the sheet (the peers chip tap looked dead) —
+  // and an equal-specificity base rule placed after the media block kept the
+  // byte-total chips visible at phone width.
+  {
+    const mob = await browser.newContext({
+      viewport: { width: 320, height: 671 },
+      isMobile: true,
+      hasTouch: true,
+      permissions: ["clipboard-read", "clipboard-write"],
+    });
+    const mp = await mob.newPage();
+    await mp.goto(BASE, { waitUntil: "domcontentloaded" });
+    await mp.getByText("Start sharing").waitFor({ timeout: 10_000 });
+    const homeW = await mp.evaluate(() => ({
+      scroll: document.documentElement.scrollWidth,
+      client: document.documentElement.clientWidth,
+    }));
+    ok(
+      "mobile 320: home has no horizontal overflow",
+      homeW.scroll <= homeW.client,
+      `scrollWidth ${homeW.scroll} vs ${homeW.client}`,
+    );
+
+    await mp.getByLabel("Your display name").fill("mobile");
+    await mp.getByRole("button", { name: /create a room/i }).click();
+    await mp.waitForURL(/\/r\//, { timeout: 10_000 });
+    // getByText would hit the hidden sidebar PeerList first (same text) — the
+    // header badge is the visible one
+    await mp.locator(".conv-head .badge").waitFor({ timeout: 10_000 });
+    const chip = mp.locator("button.stat-peers");
+    ok("mobile 320: peers chip renders as a button", (await chip.count()) === 1);
+    ok(
+      "mobile 320: byte-total stats are hidden",
+      await mp.evaluate(() =>
+        [...document.querySelectorAll(".conv-head .stat:not(.stat-peers)")].every(
+          (el) => getComputedStyle(el).display === "none",
+        ),
+      ),
+    );
+    await chip.click();
+    const sheetBox = await mp
+      .locator(".roster-sheet")
+      .waitFor({ timeout: 3000 })
+      .then(() => mp.locator(".roster-sheet").boundingBox());
+    ok(
+      "mobile 320: roster sheet opens with real height",
+      !!sheetBox && sheetBox.height > 100,
+      JSON.stringify(sheetBox),
+    );
+    // the floating close button must not bury the roster's count chip
+    await mp.waitForTimeout(400); // let the rise animation settle
+    const overlap = await mp.evaluate(() => {
+      const hit = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const b = el.getBoundingClientRect();
+        return { l: b.left, r: b.right, t: b.top, b: b.bottom };
+      };
+      const close = hit(".roster-close");
+      const count = hit(".roster-sheet .count-chip");
+      if (!close || !count) return null;
+      return !(
+        close.r <= count.l ||
+        count.r <= close.l ||
+        close.b <= count.t ||
+        count.b <= close.t
+      );
+    });
+    ok(
+      "mobile 320: close button clears the roster count chip",
+      overlap === false,
+      `overlap=${overlap}`,
+    );
+    await mp.keyboard.press("Escape");
+    ok(
+      "mobile 320: Escape closes the roster sheet",
+      (await mp.locator(".roster-backdrop").count()) === 0,
+    );
+    await mob.close();
+  }
+
   // ---- create a room ----
   await alice.page.getByLabel("Your display name").fill("alice");
   await alice.page.getByRole("button", { name: /create a room/i }).click();

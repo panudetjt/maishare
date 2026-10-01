@@ -177,12 +177,15 @@ code {
 
 .home-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0,1fr), not bare 1fr: a bare fr track's automatic minimum is the
+     card's min-content, and an <input>'s intrinsic width (the join form) then
+     forces the track past narrow viewports — the 320px horizontal overflow */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
 }
 @media (max-width: 800px) {
   .home-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -606,7 +609,6 @@ input::placeholder {
 }
 
 .count-chip {
-  margin-left: auto;
   background: var(--bg2);
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -832,23 +834,81 @@ input::placeholder {
     grid-template-columns: 1fr;
     gap: 0;
   }
-  .room-body .peers {
+  /* only the SIDEBAR roster hides at this breakpoint — the RosterSheet also
+     renders a .peers (nested deeper inside .room-body), and an unscoped
+     selector emptied the sheet to 0px: taps on the peers chip looked dead */
+  .room-body > .peers {
     display: none;
   }
   .conv {
     padding: 10px 12px 12px;
   }
-  /* byte totals are noise on a phone, but the peer count is the only
-     visible connection indicator — keep it */
-  .conv .stat {
-    display: none;
-  }
-  .conv .stat-peers {
-    display: inline-flex;
-  }
+  /* byte totals are noise on a phone; the peer count stays (the stat rules
+     live in a LATER media block, after the base .conv .stat rule — same
+     specificity, so source order decides and an earlier block would lose) */
 }
 .nearby-room .conv {
   min-height: 520px;
+}
+
+/* roster sheet — below the 900px breakpoint the sidebar is hidden and the
+   peers chip is a button; tapping it opens the roster as a bottom sheet */
+.conv button.stat-peers {
+  font-family: inherit;
+  cursor: pointer;
+}
+.conv button.stat-peers:hover {
+  background: var(--card2);
+  color: var(--text);
+}
+.conv button.stat-peers:focus-visible {
+  outline: 2px solid var(--line2);
+  outline-offset: 1px;
+}
+.roster-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  background: rgb(0 0 0 / 0.5);
+  animation: roster-fade 0.15s ease;
+}
+.roster-sheet {
+  position: relative;
+  width: min(420px, 100%);
+  max-height: min(72dvh, 560px);
+  overflow-y: auto;
+  animation: roster-rise 0.18s ease;
+}
+.roster-sheet .peers {
+  margin: 0;
+}
+/* the close button floats over the sheet's top-right corner — reserve that
+   strip so the roster's count chip (margin-left:auto, flush right) isn't
+   buried under it */
+.roster-sheet .peers-head {
+  padding-right: 40px;
+}
+.roster-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+}
+@keyframes roster-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes roster-rise {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
 }
 
 .conv {
@@ -891,6 +951,20 @@ input::placeholder {
 }
 .conv-head-spacer {
   flex: 1;
+}
+
+/* mobile app-shell stats: byte totals hide at the 900px breakpoint, the peers
+   chip stays. This block MUST come after the base .conv .stat rules above —
+   equal specificity, so the later source order is what makes the override
+   actually win (an earlier block was silently losing to the base rule and
+   the byte chips stayed visible on phones) */
+@media (max-width: 900px) {
+  .conv .stat {
+    display: none;
+  }
+  .conv .stat-peers {
+    display: inline-flex;
+  }
 }
 
 .conv-log-wrap {

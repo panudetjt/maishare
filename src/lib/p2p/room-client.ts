@@ -260,6 +260,17 @@ interface PeerCtx {
    * proven: everything sent after that opens fine on its side. */
   sealedChats: Set<string>;
   sealedFiles: Set<string>;
+  /** the first sealed frame on any connection is provably the sender's
+   * proof-challenge ping (hello is plain and always precedes sealed traffic),
+   * so a keyless receiver absorbs exactly that one in silence — failing it
+   * is the designed join state, not a lost message; every LATER sealed
+   * failure is a real undelivered payload and stays loud (no-silence rule) */
+  challengeSeen: boolean;
+  /** ids of the system bubbles this peer's undecryptable reports created —
+   * removed once the peer proves key possession: the report's advice ("share
+   * the key or resend once they do") is then fulfilled for the share half,
+   * and the per-message unreadableBy stamps carry what was actually lost */
+  unreadableBubbleIds: string[];
   /** we asked this peer to share the room key (once per connection) */
   keyRequested: boolean;
   /** the user answered the key-share prompt for this peer (either way) */
@@ -746,13 +757,39 @@ export class RoomClient {
     if (ctx) {
       ctx.keyShareDecided = true;
       if (allow && this.roomKey) {
+        // everything sealed to this peer went out while it demonstrably held
+        // no key (it just asked for one) — those frames are lost for good;
+        // stamp them now, since its report latch can never cover them
+        this.stampSealedLedger(ctx);
         void this.sendControl(ctx, { t: "key-offer", k: this.roomKey }, "plain");
       } else if (!allow) {
+        this.stampSealedLedger(ctx);
         // the server enforces host authority; the client only makes the ask
         this.sig.send({ t: "kick", peerId });
       }
     }
     this.schedule();
+  }
+
+  /** mark every chat/transfer we SEALED to this peer while it was unproven as
+   * unreadable-by it — the shared core of the two moments keylessness becomes
+   * final knowledge: the key-share decision (the peer demonstrably had no key
+   * when those frames were delivered) and an undecryptable report correlating
+   * the ledger */
+  private stampSealedLedger(ctx: PeerCtx) {
+    const name = ctx.name;
+    if (ctx.sealedChats.size) {
+      this.chats = this.chats.map((m) =>
+        ctx.sealedChats.has(m.id)
+          ? { ...m, unreadableBy: withUnreadableBy(m.unreadableBy, name) }
+          : m,
+      );
+    }
+    if (ctx.sealedFiles.size) {
+      for (const v of this.transfers) {
+        if (ctx.sealedFiles.has(v.id)) v.unreadableBy = withUnreadableBy(v.unreadableBy, name);
+      }
+    }
   }
 
   /** hide a key-share prompt without deciding it (a non-host's "not now" —
@@ -942,6 +979,8 @@ export class RoomClient {
       undecryptableWarned: false,
       sealedChats: new Set(),
       sealedFiles: new Set(),
+      challengeSeen: false,
+      unreadableBubbleIds: [],
       keyRequested: false,
       keyShareDecided: false,
     };
@@ -1405,7 +1444,8 @@ export class RoomClient {
             (pt) => this.onControl(ctx, JSON.parse(decoder.decode(pt)) as Control, true),
             () => this.notifyUndecryptable(ctx, "sealed"),
           );
-        else this.notifyUndecryptable(ctx, "sealed");
+        else if (ctx.challengeSeen) this.notifyUndecryptable(ctx, "sealed");
+        else ctx.challengeSeen = true; // the sealed challenge ping — expected
         break;
       case FRAME.CHUNK:
         this.onChunk(ctx, body);
@@ -1416,7 +1456,9 @@ export class RoomClient {
             (pt) => this.onChunk(ctx, pt),
             () => this.notifyUndecryptable(ctx, "sealed", "chunk"),
           );
-        else this.notifyUndecryptable(ctx, "sealed", "chunk");
+        // keyless: the challenge absorption covers the first frame here too
+        else if (ctx.challengeSeen) this.notifyUndecryptable(ctx, "sealed", "chunk");
+        else ctx.challengeSeen = true;
         break;
     }
   }
@@ -1505,6 +1547,12 @@ export class RoomClient {
         this.schedule();
         break;
       case "undecryptable": {
+        // a "sealed" report against an empty ledger can only concern the
+        // proof-challenge ping — a protocol frame the receiver was never
+        // meant to open, not a message — so there is no failure to surface
+        // (warning here fired a permanent scare at every first join of a
+        // keyless member, before anything was actually sent)
+        if (c.detail === "sealed" && !ctx.sealedChats.size && !ctx.sealedFiles.size) break;
         this.toast(
           c.detail === "orphan"
             ? "The other side got file data without a header — resend the file"
@@ -1516,34 +1564,24 @@ export class RoomClient {
           // it too — so correlate the report against the ledger of what we
           // sealed to this peer while it was still unproven. A persistent
           // system bubble keeps the failure in the timeline (the toast alone
-          // vanished in four seconds and fired once per connection).
-          const name = ctx.name;
-          if (ctx.sealedChats.size) {
-            this.chats = this.chats.map((m) =>
-              ctx.sealedChats.has(m.id)
-                ? { ...m, unreadableBy: withUnreadableBy(m.unreadableBy, name) }
-                : m,
-            );
-          }
-          if (ctx.sealedFiles.size) {
-            for (const v of this.transfers) {
-              if (ctx.sealedFiles.has(v.id))
-                v.unreadableBy = withUnreadableBy(v.unreadableBy, name);
-            }
-          }
+          // vanished in four seconds and fired once per connection) until
+          // the peer proves possession and the advice resolves.
+          this.stampSealedLedger(ctx);
           const what = c.kind === "chunk" ? "the file you sent" : "your recent messages";
+          const bubbleId = rid();
           this.chats = [
             ...this.chats,
             {
-              id: rid(),
+              id: bubbleId,
               peerId: ctx.peerId,
-              name,
-              text: `⚠︎ ${name} couldn't read ${what} — they don't have the room key. Share the key or resend once they do.`,
+              name: ctx.name,
+              text: `⚠︎ ${ctx.name} couldn't read ${what} — they don't have the room key. Share the key or resend once they do.`,
               at: Date.now(),
               mine: false,
               system: true,
             },
           ];
+          ctx.unreadableBubbleIds.push(bubbleId);
           this.capChats();
         }
         this.schedule();
@@ -1742,6 +1780,13 @@ export class RoomClient {
           // it the moment the first unreadable frame lands)
           ctx.sealedChats.clear();
           ctx.sealedFiles.clear();
+          // the warning bubble's advice is fulfilled for the share half —
+          // resolve it; the per-message stamps stay (those frames are gone)
+          if (ctx.unreadableBubbleIds.length) {
+            const gone = new Set(ctx.unreadableBubbleIds);
+            ctx.unreadableBubbleIds = [];
+            this.chats = this.chats.filter((m) => !gone.has(m.id));
+          }
           this.flushForPeer(ctx);
           this.schedule();
         }

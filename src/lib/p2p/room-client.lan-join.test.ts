@@ -209,8 +209,10 @@ describe("LAN-list join into a keyed room (key share)", () => {
     const bubbles = mac.client
       .getSnapshot()
       .chats.filter((c) => c.system && c.text === UNDECRYPTABLE);
-    // 1 from the sealed challenge ping + 1 per undecryptable message
-    expect(bubbles.length).toBe(4);
+    // 1 per undecryptable message — the sealed challenge ping (the first
+    // sealed frame of any connection) is absorbed silently on the keyless
+    // side: failing it is the designed join state, not a lost message
+    expect(bubbles.length).toBe(3);
 
     // the sender learns once (throttled back-channel), not per message
     const backChannels = macToWin.channel!.sent.filter(

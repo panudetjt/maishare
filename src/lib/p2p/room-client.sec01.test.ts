@@ -253,7 +253,10 @@ describe("withholding from unproven peers (SEC-01)", () => {
     await h.flush();
 
     // the peer holds the WRONG key: our sealed challenge cannot be opened, so
-    // the designed warning fires on their side and the back-channel toast on ours
+    // the designed warning fires on their side. Their report arrives against
+    // an EMPTY ledger — the only sealed frame it can explain is the challenge
+    // ping itself, not any message — so this side stays quiet (same rule as
+    // the keyless joiner; the wrong-key member's own warning path is intact)
     const sealed = [...ch.sent].reverse().find((f) => f[0] === FRAME.CONTROL_ENC)!;
     const wrongCipher = await RoomCipher.fromKey("not the room key");
     await expect(wrongCipher.open(sealed.subarray(1) as Uint8Array<ArrayBuffer>)).rejects.toThrow();
@@ -266,7 +269,7 @@ describe("withholding from unproven peers (SEC-01)", () => {
     );
     await h.settle();
     expect(h.client.getSnapshot().toasts.some((t) => t.msg.toLowerCase().includes("decrypt"))).toBe(
-      true,
+      false,
     );
 
     // the wrong-key member receives the payload as SEALED ciphertext — their
@@ -277,6 +280,22 @@ describe("withholding from unproven peers (SEC-01)", () => {
     expect(await payloadCount(ch)).toBe(1); // the sealed chat (pings are not payloads)
     expect(ch.sent.at(-1)![0]).toBe(FRAME.CONTROL_ENC);
     expect(h.client.getSnapshot().consents).toEqual([]);
+
+    // a report that lands while the ledger holds real payloads still surfaces
+    // — the wrong-key failure is not silenced, just no longer invented
+    ch.receive(
+      concatFrame(
+        FRAME.CONTROL,
+        encoder.encode(JSON.stringify({ t: "undecryptable", detail: "sealed" })),
+      ),
+    );
+    await h.settle();
+    expect(h.client.getSnapshot().toasts.some((t) => t.msg.toLowerCase().includes("decrypt"))).toBe(
+      true,
+    );
+    expect(
+      h.client.getSnapshot().chats.find((c) => c.text === "not for mallory")?.unreadableBy,
+    ).toEqual(["stranger"]);
   });
 
   it("keeps the keyless room fully open (no gating without a key)", async () => {
