@@ -6,3 +6,5 @@ dist/
 .wrangler
 # per-session playground (video builds, venvs, scratch data)
 .playground/
+
+.zcode
